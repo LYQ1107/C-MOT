@@ -158,6 +158,8 @@ def build_report(run_root: str, project_root: str, public_output: str) -> dict:
     public_path.mkdir(parents=True, exist_ok=True)
     config_path = project_path / "configs" / "cmot_curriculum.yaml"
     config_hash = _hash_or_none(config_path)
+    data_manifest_path = project_path.parent / "cmot_annotations" / "bdd100k_mot_local.json"
+    data_manifest_hash = _hash_or_none(data_manifest_path)
     registry_hash = canonical_json_hash(tao_bdd_registry().as_dict())
     rows: List[dict] = []
     for spec in _specs():
@@ -212,6 +214,7 @@ def build_report(run_root: str, project_root: str, public_output: str) -> dict:
             "checkpoint_sha256": checkpoint_hash,
             "checkpoint_bytes": None if checkpoint_path is None or not checkpoint_path.is_file() else checkpoint_path.stat().st_size,
             "config_sha256": config_hash,
+            "data_manifest_sha256": data_manifest_hash,
             "class_registry_sha256": registry_hash,
             "train_view_sha256": train_view_hash,
             "eval_view_sha256": eval_view_hash,
@@ -228,7 +231,7 @@ def build_report(run_root: str, project_root: str, public_output: str) -> dict:
     fields = [
         "method", "stage", "scope", "steps", "status", "label_protocol", "motion_mode",
         "train_source_count", "train_frames_exposed", "video_count", "frame_count",
-        "parent_checkpoint_sha256", "checkpoint_sha256", "checkpoint_bytes", "config_sha256",
+        "parent_checkpoint_sha256", "checkpoint_sha256", "checkpoint_bytes", "config_sha256", "data_manifest_sha256",
         "class_registry_sha256", "train_view_sha256", "eval_view_sha256",
         "old_hota_mean", "old_idf1", "old_mota", "new_hota_mean", "new_idf1", "new_mota",
         "seen_hota_mean", "seen_idf1", "seen_mota", "raw_prediction_artifact", "raw_prediction_sha256",
@@ -253,6 +256,7 @@ def build_report(run_root: str, project_root: str, public_output: str) -> dict:
         "scope_note": "All non-asset rows are 4-video/320-frame pilot prefixes, not full BDD100K benchmark results.",
         "code_commit": _git_commit(project_path),
         "config_sha256": config_hash,
+        "data_manifest_sha256": data_manifest_hash,
         "class_registry_sha256": registry_hash,
         "rows": rows,
         "unrun": [
