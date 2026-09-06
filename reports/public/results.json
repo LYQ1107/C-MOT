@@ -1,6 +1,6 @@
 {
   "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-  "code_commit": "b50eafb4893ac9543c364b1c41292bbaf158eb4b",
+  "code_commit": "cd7b85016a26cde6f880becba583ab3f56bb8fdb",
   "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
   "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
   "download_audit": {
@@ -491,7 +491,7 @@
     },
     {
       "checkpoint_bytes": 714989229,
-      "checkpoint_sha256": "d0035c4679cf8549fc6951f28882675eb7869e537673d8c6bbe8d985df3226f7",
+      "checkpoint_sha256": "1a71212805a7fe78a46347d59c52ba846abf9315cac7494f23c0f8db97c02d0c",
       "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
       "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
       "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
@@ -501,37 +501,37 @@
       "method": "O2-CMOT",
       "motion_mode": "category_conditioned",
       "new": {
-        "hota_mean": 0.0,
+        "hota_mean": 0.009568233085136173,
         "idf1": 0.0,
-        "mota": -96.46875
+        "mota": -4.40625
       },
       "old": {
-        "hota_mean": 0.005013594724946895,
-        "idf1": 0.0005340693844937882,
-        "mota": -14.322826808228267
+        "hota_mean": 0.012064323527065263,
+        "idf1": 0.0017531342333939753,
+        "mota": -5.120769741207697
       },
       "parent_checkpoint_sha256": "aa5bc042b70e7cfdf7c7ce71cdd0876bf5ff1ec4f19c138f0fc69a790aece4da",
-      "raw_metric_artifact": "private-run-artifact:O2_S2_100/eval_trackeval_100.json",
-      "raw_metric_sha256": "4c58c86c2de3689d8f917a10baec771c2ecfd5841b3f9f66e6b791aa37eb0cfd",
-      "raw_prediction_artifact": "private-run-artifact:O2_S2_100/eval_independent.jsonl",
-      "raw_prediction_sha256": "09cee6c15d36cf50f1de0df422b82b5d61131223a6fb06d4a5e3bb4a08d02829",
+      "raw_metric_artifact": "private-run-artifact:O2_S2_commonPL_100/eval_trackeval_100.json",
+      "raw_metric_sha256": "2c0d501458af6cb209fe2ab472558053cce4d34a03f0bf55e49873bce0550d1e",
+      "raw_prediction_artifact": "private-run-artifact:O2_S2_commonPL_100/eval_independent.jsonl",
+      "raw_prediction_sha256": "f5d8a0ca756622fcdd29760e18f370fb580507cdec40c6fcd1b39ff483c7d201",
       "scope": "pilot",
       "seen": {
-        "hota_mean": 0.004960923999011799,
-        "idf1": 0.000528458675267327,
-        "mota": -15.185817465528562
+        "hota_mean": 0.012038100646519717,
+        "idf1": 0.0017347165395434805,
+        "mota": -5.113263296126067
       },
       "stage": "S2_truck",
       "status": "OK",
       "steps": 100,
       "train_frames_exposed": 200,
       "train_source_count": 154,
-      "train_view_sha256": "9177faafebe1a4d28e4910d74e6225f66fdae8eb0778b15e60be672af171401f",
+      "train_view_sha256": "66eccf1d5653884f228e2a50ecf24bfe9e1c49a5f3e754fe1e25c8167ed2af4f",
       "video_count": 4
     },
     {
-      "checkpoint_bytes": 714989613,
-      "checkpoint_sha256": "1792973f4edf5f2c7fc8fbdfffff61d22eec6b79c748884c84d8e88d861f41a9",
+      "checkpoint_bytes": 714989677,
+      "checkpoint_sha256": "2c152b34377a362dae85c2ec50e35ba924030fe320bcc26a1b0c883518bd980a",
       "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
       "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
       "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
@@ -546,27 +546,27 @@
         "mota": 0.0
       },
       "old": {
-        "hota_mean": 0.017159634995512228,
-        "idf1": 0.002940136900446698,
-        "mota": -16.923689449236893
+        "hota_mean": 0.021791479065106215,
+        "idf1": 0.004983439154213713,
+        "mota": -16.868613138686133
       },
       "parent_checkpoint_sha256": "aa5bc042b70e7cfdf7c7ce71cdd0876bf5ff1ec4f19c138f0fc69a790aece4da",
-      "raw_metric_artifact": "private-run-artifact:O2_S2_100/eval_trackeval_300.json",
-      "raw_metric_sha256": "77dc615ffece2dabeecd21147337634634bd09dbb87480acf0ccdce743d24d3c",
-      "raw_prediction_artifact": "private-run-artifact:O2_S2_100/eval_independent_300.jsonl",
-      "raw_prediction_sha256": "3cf70c039bacf26c79f386643178a4805c27ce81065aa3784fb0d0f1841ee1d6",
+      "raw_metric_artifact": "private-run-artifact:O2_S2_commonPL_100/eval_trackeval_300.json",
+      "raw_metric_sha256": "4a4162e6ca006d1a426d6c0e8c0a20e7cd3e3cc2ffa06d9f30f4ca8b4c1199ac",
+      "raw_prediction_artifact": "private-run-artifact:O2_S2_commonPL_100/eval_independent_300.jsonl",
+      "raw_prediction_sha256": "fa4aae0e9e40da7a01e629976e0ab1c7c5f7ed145cea9b5caf22e1ab64a10438",
       "scope": "pilot",
       "seen": {
-        "hota_mean": 0.01697936305859286,
-        "idf1": 0.002909249053823489,
-        "mota": -16.745896257386736
+        "hota_mean": 0.021562546914717706,
+        "idf1": 0.0049310852300722685,
+        "mota": -16.6913985554826
       },
       "stage": "S2_truck",
       "status": "OK",
       "steps": 300,
       "train_frames_exposed": 600,
       "train_source_count": 154,
-      "train_view_sha256": "9177faafebe1a4d28e4910d74e6225f66fdae8eb0778b15e60be672af171401f",
+      "train_view_sha256": "66eccf1d5653884f228e2a50ecf24bfe9e1c49a5f3e754fe1e25c8167ed2af4f",
       "video_count": 4
     }
   ],
