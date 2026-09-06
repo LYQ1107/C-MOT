@@ -140,6 +140,25 @@ def build_stage_view(
     return payload["stats"]
 
 
+def export_stage_view_jsonl(view_path: str, output_path: str) -> dict:
+    """Export an audit-friendly one-video-per-line view.
+
+    The training adapter consumes the canonical JSON view.  This JSONL form
+    exists for the required private manifest layout and keeps each video as a
+    self-contained record while retaining the parent/stage metadata header.
+    """
+    payload = read_json(view_path)
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    header = {key: value for key, value in payload.items() if key != "videos"}
+    header["record_type"] = "manifest"
+    with destination.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(header, sort_keys=True, ensure_ascii=False) + "\n")
+        for video in payload.get("videos", []):
+            handle.write(json.dumps({"record_type": "video", "video": video}, sort_keys=True, ensure_ascii=False) + "\n")
+    return {"videos": len(payload.get("videos", [])), "manifest_hash": payload.get("manifest_hash"), "output": destination.name}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--canonical", required=True)
@@ -150,8 +169,13 @@ def main() -> None:
     parser.add_argument("--split", default="train")
     parser.add_argument("--mode", choices=("train", "eval"), default="train")
     parser.add_argument("--label-scope", choices=("partial", "complete"))
+    parser.add_argument("--jsonl-output")
     args = parser.parse_args()
-    print(json.dumps(build_stage_view(args.canonical, args.stage, args.output, args.pl_jsonl, args.replay_max_frames, args.split, args.mode, args.label_scope), indent=2, sort_keys=True))
+    stats = build_stage_view(args.canonical, args.stage, args.output, args.pl_jsonl, args.replay_max_frames, args.split, args.mode, args.label_scope)
+    result = {"stats": stats}
+    if args.jsonl_output:
+        result["jsonl"] = export_stage_view_jsonl(args.output, args.jsonl_output)
+    print(json.dumps(result, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
