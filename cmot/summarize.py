@@ -235,7 +235,7 @@ def build_report(run_root: str, project_root: str, public_output: str) -> dict:
         "raw_metric_artifact", "raw_metric_sha256",
     ]
     with (public_path / "results.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             flat = {key: row.get(key) for key in fields}
