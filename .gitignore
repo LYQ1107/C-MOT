@@ -1,6 +1,10 @@
 # Local task attachment and private runtime assets
 CMOT_Codex_完整执行提示词_20260907.md
 model_zoo/
+ovtr_det_bs2_pretrain/
+process/
+assets/
+video/
 cmot_datasets/
 cmot_annotations/
 cmot_downloads/
