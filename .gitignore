@@ -1,0 +1,31 @@
+# Local task attachment and private runtime assets
+CMOT_Codex_完整执行提示词_20260907.md
+model_zoo/
+cmot_datasets/
+cmot_annotations/
+cmot_downloads/
+cmot_cache/
+cmot_runs/
+cmot_private_reports/
+private/
+reports/private/
+*.pth
+*.pt
+*.pth.tar
+*.ckpt
+*.zip
+*.h5
+*.jsonl
+*.log
+*.out
+assets/*.png
+video/*.mp4
+video/*.gif
+ovtr/results/*.gif
+
+# Python and native build products
+__pycache__/
+*.py[cod]
+.pytest_cache/
+ovtr/models/ops/*.so
+ovtr/models/ops/build/

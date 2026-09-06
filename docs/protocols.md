@@ -1,0 +1,20 @@
+# C-MOT protocols
+
+All methods in a comparison share the same S0 initialization, video list, PL/replay view, input resolution, optimizer, step count, thresholds, and evaluator.
+
+## Stages
+
+1. `S0_ref`: car-only foundation.  A legal/known foundation checkpoint may initialize this stage; its audit is retained.
+2. `S1_pedestrian`: current pedestrian GT, bounded car GT replay, and car PL from the same S0 checkpoint.
+3. `S2_truck`: current truck GT and the same partial-label/replay mechanism for seen old classes.
+
+`B1` is ordinary OVTR with partial-label processing, old-class PL, and bounded GT replay.  `O2` uses the exact B1 view and additionally enables the category-conditioned causal motion head.  No O2-specific pretraining is permitted.
+
+## Step schedule
+
+Each method is trained first to 100 optimizer steps and evaluated, then continued under the same conditions to 300 steps and evaluated again.  The separate R1 smoke performs at least 20 steps, saves, reloads, and evaluates on a different video list.  Every output is marked `pilot`, `asset_check`, or `full`.
+
+## Motion causality
+
+The motion head sees only current decoder features, current predicted boxes, and current semantic selection.  It emits an inverse-sigmoid delta.  The updater adds that delta to the current inverse-sigmoid box before the next frame's transformer call.  The next-frame annotation is available only to `loss_motion`, where it supplies a target displacement.  The motion loss appears in `criterion.weight_dict` and is normalized once.
+

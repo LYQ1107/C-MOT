@@ -1,0 +1,44 @@
+project: C-MOT
+schema_version: cmot.curriculum.v1
+seed: 20260907
+network:
+  bulk_policy: direct-only
+  require_route_audit: true
+  fallback_to_proxy: false
+  initial_download_budget_gib: 50
+resources:
+  protected_gpu_ids: [2, 3, 4]
+  max_gpus: 1
+  max_concurrent_trainers: 1
+  dataloader_workers_per_trainer: 0
+  min_free_ram_fraction: 0.25
+protocol:
+  name: bdd_foundation_assisted_label_cil_pilot
+  class_order: [[car], [pedestrian], [truck]]
+  pilot_train_source_cap_per_stage: 32
+  eval_manifest_is_immutable: true
+training:
+  batch_size_per_gpu: 1
+  clip_frames: 2
+  early_eval_optimizer_steps: 100
+  max_optimizer_steps_per_stage: 300
+  smoke_optimizer_steps: 20
+  custom_activation_checkpoint: false
+  implicit_downloads: false
+motion:
+  enabled: true
+  history_length: 4
+  hidden_dim: 128
+  num_modes: 3
+  mode: class_conditioned
+  detach_motion_reference: true
+  warmup_steps: 20
+  lambda_motion: 0.1
+replay:
+  budget_mib: 512
+  source: legally_observed_gt_only
+  ratio_schedule: [current, current, current, replay]
+report:
+  require_raw_metrics: true
+  allow_estimated_metrics: false
+  redact_private_paths: true

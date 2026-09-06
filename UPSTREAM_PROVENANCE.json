@@ -1,0 +1,12 @@
+{
+  "upstream_repository": "https://github.com/jinyanglii/OVTR",
+  "upstream_commit": "500e72c19bf5f7f8717546911a5639fdc26bfee5",
+  "import_policy": "source imported from a clean archived commit; the original checkout and remote were not modified",
+  "local_changes_are_in": [
+    "cmot/",
+    "ovtr/models/ovtr.py",
+    "ovtr/models/updater.py",
+    "ovtr/util/clip_utils.py"
+  ],
+  "public_repository": "https://github.com/LYQ1107/C-MOT"
+}
