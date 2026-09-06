@@ -41,13 +41,10 @@ def canonical_json_hash(value: Any) -> str:
 def redact_path(value: str) -> str:
     """Replace local path roots without attempting to identify users."""
     value = str(value)
-    for prefix, token in (
-        ("/data1/", "$DATA1/"),
-        ("/data2/", "$DATA2/"),
-        ("/home/", "$HOME/"),
-    ):
-        if value.startswith(prefix):
-            return token + value[len(prefix):]
+    if len(value) >= 7 and value.startswith("/data") and value[5] in "12" and value[6] == "/":
+        return "$DATA%s/" % value[5] + value[7:]
+    if value.startswith("/home/"):
+        return "$HOME/" + value[len("/home/"):]
     return value
 
 
@@ -57,4 +54,3 @@ def path_exists_and_size(path: str) -> Dict[str, Any]:
         stat = os.stat(path)
         result.update({"bytes": int(stat.st_size), "is_file": os.path.isfile(path), "is_dir": os.path.isdir(path)})
     return result
-
