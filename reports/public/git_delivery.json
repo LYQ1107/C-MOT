@@ -1,0 +1,10 @@
+{
+  "schema_version": "cmot.git-delivery.v1",
+  "repository": "https://github.com/LYQ1107/C-MOT",
+  "delivery_branch": "main",
+  "content_commit": "4d4d47d8a5c4c47e14ab4a7f319689bf75a17fc4",
+  "remote_content_commit_verified": "4d4d47d8a5c4c47e14ab4a7f319689bf75a17fc4",
+  "push_verified": true,
+  "force_push": false,
+  "note": "The delivery metadata is an additional ordinary commit after the code/results content commit; final remote HEAD is reported in the handoff."
+}
