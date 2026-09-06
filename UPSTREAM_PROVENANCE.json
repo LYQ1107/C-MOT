@@ -6,7 +6,9 @@
     "cmot/",
     "ovtr/models/ovtr.py",
     "ovtr/models/updater.py",
-    "ovtr/util/clip_utils.py"
+    "ovtr/models/utils.py",
+    "ovtr/util/clip_utils.py",
+    "ovtr/util/slconfig.py"
   ],
   "public_repository": "https://github.com/LYQ1107/C-MOT"
 }
