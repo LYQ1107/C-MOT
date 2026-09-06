@@ -107,7 +107,7 @@ def _specs() -> List[dict]:
             })
     for method, run, mode, view, parent in (
         ("B1-PLR", "B1_S2_100", "none", "bdd_S2_train_B1.json", "148c72afeabe47a702ef9418b03b1c26f7f00b7af943fd0fcb5e4fa141b160d4"),
-        ("O2-CMOT", "O2_S2_100", "category_conditioned", "bdd_S2_train_O2.json", "aa5bc042b70e7cfdf7c7ce71cdd0876bf5ff1ec4f19c138f0fc69a790aece4da"),
+        ("O2-CMOT", "O2_S2_commonPL_100", "category_conditioned", "bdd_S2_train_O2_commonPL.json", "aa5bc042b70e7cfdf7c7ce71cdd0876bf5ff1ec4f19c138f0fc69a790aece4da"),
     ):
         for steps, suffix in ((100, "100"), (300, "300")):
             specs.append({
