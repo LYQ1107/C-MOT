@@ -85,6 +85,8 @@ def _convert_split(annotation_path: Path, split: str, frames_root: Path) -> tupl
                     timestamp_s=float(frame_index) / 30.0,
                     label_scope="partial" if category_id_in_not_exhaustive(video, TAO_CATEGORY_MAP) else "complete",
                     supervised_global_ids=list(GLOBAL_IDS.values()),
+                    exhaustive_global_ids=list(GLOBAL_IDS.values()),
+                    annotation_valid=True,
                     source_image_id=int(image["id"]),
                 )
             )

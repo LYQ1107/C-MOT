@@ -10,6 +10,7 @@ DETR model and criterion classes.
 import torch
 import torch.nn.functional as F
 from torch import nn
+import math
 from typing import List
 import copy
 from util import box_ops, checkpoint
@@ -51,8 +52,8 @@ class TrackerPostProcess(nn.Module):
 
         # convert to [x0, y0, x1, y1] format
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
-        boxes = boxes.clamp(0, 1)  
-        
+        boxes = boxes.clamp(0, 1)
+
         # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_size
         scale_fct = torch.Tensor([img_w, img_h, img_w, img_h]).to(boxes)
@@ -80,29 +81,42 @@ class RuntimeTrackerBase(object):
     def clear(self):
         self.max_obj_id = 0
 
-    def update(self, track_instances: Instances, _track_discard, is_repeat=False):
-        if _track_discard is None:
-            _track_discard = torch.zeros(0, dtype=torch.long, device=track_instances.scores.device)
-        cancel_disappear = track_instances.scores >= self.score_thresh
-        cancel_disappear[_track_discard] = False
+    def update(self, track_instances: Instances, _track_discard=None, is_repeat=False):
+        if not track_instances.has("suppressed_this_frame"):
+            track_instances.suppressed_this_frame = torch.zeros(len(track_instances), dtype=torch.bool, device=track_instances.scores.device)
+        suppressed = track_instances.suppressed_this_frame.bool()
+        if _track_discard is not None and len(_track_discard):
+            if _track_discard.dtype == torch.bool and len(_track_discard) == len(track_instances):
+                suppressed = suppressed | _track_discard
+            elif _track_discard.dtype != torch.bool:
+                discard_mask = torch.zeros(len(track_instances), dtype=torch.bool, device=track_instances.scores.device)
+                discard_mask[_track_discard] = True
+                suppressed = suppressed | discard_mask
+            track_instances.suppressed_this_frame = suppressed
+        cancel_disappear = (track_instances.scores >= self.score_thresh) & (~suppressed)
         track_instances.disappear_time[cancel_disappear] = 0
-        # Found valid index
-        score_indx = track_instances.scores >= self.score_thresh
-        obj_indx = track_instances.obj_idxes != -1 
+        # Suppressed new detections are removed; suppressed existing tracks are
+        # retained so aging occurs exactly once in this runtime.
+        score_indx = (track_instances.scores >= self.score_thresh) & (~suppressed)
+        obj_indx = track_instances.obj_idxes != -1
         valid_indx = score_indx | obj_indx
         track_instances = track_instances[valid_indx]
 
         if len(track_instances) > self.maximum_quantity:
-            top_indices = self.quantity_filter(track_instances, self.maximum_quantity) 
+            top_indices = self.quantity_filter(track_instances, self.maximum_quantity)
             track_instances = track_instances[top_indices]
 
         for i in range(len(track_instances)):
             if track_instances.obj_idxes[i] == -2:
                 continue
-            elif track_instances.obj_idxes[i] == -1 and track_instances.scores[i] >= self.score_thresh:
+            elif track_instances.obj_idxes[i] == -1 and track_instances.scores[i] >= self.score_thresh and not bool(track_instances.suppressed_this_frame[i]):
                 # print("track {} has score {:.2f}, assign obj_id {}, cls is {}".format(i, track_instances.scores[i], self.max_obj_id, track_instances.cls_idxes[i]))
                 track_instances.obj_idxes[i] = self.max_obj_id
                 self.max_obj_id += 1
+            elif track_instances.obj_idxes[i] >= 0 and bool(track_instances.suppressed_this_frame[i]):
+                track_instances.disappear_time[i] += 1
+                if track_instances.disappear_time[i] >= self.miss_tolerance:
+                    track_instances.obj_idxes[i] = -1
             elif track_instances.obj_idxes[i] >= 0 and track_instances.scores[i] < self.filter_score_thresh and is_repeat is False:
                 track_instances.disappear_time[i] += 1
                 # print(track_instances.obj_idxes[i])
@@ -116,7 +130,7 @@ class RuntimeTrackerBase(object):
                 # track_instances.obj_idxes[i] = self.max_obj_id
                 # self.max_obj_id += 1
         return track_instances
-    
+
     @staticmethod
     def quantity_filter(track_instances, maximum_quantity):
         scores = track_instances.scores
@@ -126,14 +140,27 @@ class RuntimeTrackerBase(object):
 
 
 class CausalMotionHead(nn.Module):
-    """Predict inverse-sigmoid reference-point deltas from past/current data."""
+    """One-step causal residual head used by repair_v2.
 
-    def __init__(self, hidden_dim, text_dim, mode="class_conditioned"):
+    The output is a logit-box velocity.  The last layer is zero initialized so
+    adding the head cannot change the original reference trajectory at step 0.
+    """
+
+    def __init__(self, hidden_dim, text_dim, mode="one_step_conditioned_v2", velocity_limit=1.25,
+                 detach_features=True):
         super().__init__()
-        mode = {"category_conditioned": "class_conditioned", "category_agnostic": "class_agnostic"}.get(mode, mode)
-        if mode not in ("class_conditioned", "class_agnostic"):
-            raise ValueError("motion mode must be class_conditioned or class_agnostic")
+        aliases = {
+            "class_conditioned": "one_step_conditioned_v2",
+            "category_conditioned": "one_step_conditioned_v2",
+            "class_agnostic": "one_step_agnostic_v2",
+            "category_agnostic": "one_step_agnostic_v2",
+        }
+        mode = aliases.get(mode, mode)
+        if mode not in ("one_step_conditioned_v2", "one_step_agnostic_v2"):
+            raise ValueError("motion mode must be one_step_agnostic_v2 or one_step_conditioned_v2")
         self.mode = mode
+        self.velocity_limit = float(velocity_limit)
+        self.detach_features = bool(detach_features)
         input_dim = hidden_dim + 4 + text_dim
         self.net = nn.Sequential(
             nn.LayerNorm(input_dim),
@@ -141,24 +168,21 @@ class CausalMotionHead(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, 4),
         )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
 
     def forward(self, hs, boxes, logits, select_id, text_embeddings):
-        # The class decision is detached, while the head and decoder feature
-        # remain differentiable.  No future annotation enters this function.
-        labels = logits.detach().sigmoid().argmax(dim=-1)
-        global_ids = select_id[labels]
-        # ``text_embeddings`` is [text_dim, global_vocab].  Advanced indexing
-        # with a [batch, query] tensor otherwise produces [text_dim, batch,
-        # query], which is not aligned with the [batch, query, hidden] query
-        # features.  Flatten/gather and restore the query axes explicitly.
-        batch, queries = global_ids.shape
-        if self.mode == "class_agnostic":
-            text = torch.zeros((batch, queries, text_embeddings.shape[0]), device=hs.device, dtype=hs.dtype)
+        if self.detach_features:
+            hs, boxes, logits = hs.detach(), boxes.detach(), logits.detach()
+        evidence = logits.sigmoid()
+        evidence = evidence / evidence.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+        if self.mode == "one_step_agnostic_v2":
+            semantic = torch.zeros((*evidence.shape[:2], text_embeddings.shape[0]), device=hs.device, dtype=hs.dtype)
         else:
-            text = text_embeddings[:, global_ids.reshape(-1)].transpose(0, 1)
-            text = text.reshape(batch, queries, -1).to(hs.device, hs.dtype)
-        features = torch.cat([hs, boxes, text], dim=-1)
-        return 0.25 * torch.tanh(self.net(features))
+            active_text = text_embeddings[:, select_id].transpose(0, 1).to(hs.device, hs.dtype)
+            semantic = torch.matmul(evidence.to(active_text), active_text)
+        features = torch.cat([hs, boxes.detach() if self.detach_features else boxes, semantic], dim=-1)
+        return self.velocity_limit * torch.tanh(self.net(features))
 
 
 class OVFrameMatcher(SetCriterion):
@@ -202,6 +226,7 @@ class OVFrameMatcher(SetCriterion):
         self.gt_instances = gt_instances
         self.frame_metadata = frame_metadata or []
         self.num_samples = 0
+        self.motion_pairs = 0
         self.sample_device = None
         self._current_frame_idx = 0
         self.losses_dict = {}
@@ -210,7 +235,8 @@ class OVFrameMatcher(SetCriterion):
         self._current_frame_idx += 1
 
     def get_num_boxes(self, num_samples):
-        num_boxes = torch.as_tensor(num_samples, dtype=torch.float, device=self.sample_device)
+        device = self.sample_device or next(self.parameters(), torch.zeros(1)).device
+        num_boxes = torch.as_tensor(num_samples, dtype=torch.float, device=device)
         if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_boxes)
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
@@ -227,56 +253,83 @@ class OVFrameMatcher(SetCriterion):
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, gt_instances, indices, num_boxes, **kwargs)
 
-    def loss_labels(self, outputs, gt_instances: List[Instances], indices, num_boxes, log=False):
-        """Classification loss (NLL)
-        targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
-        """
-        src_logits = outputs['pred_logits']
-        num_class = src_logits.shape[-1]
-        select_id = outputs["select_id"]
-        target = torch.zeros_like(src_logits)
-        valid = torch.ones_like(src_logits, dtype=torch.bool)
-        positive_weights = torch.ones_like(src_logits)
+    def _frame_metadata(self, index=None):
+        index = self._current_frame_idx if index is None else int(index)
+        return self.frame_metadata[index] if index < len(self.frame_metadata) else {}
 
-        # A partial view supervises only explicitly observed/new classes.
-        # Missing old-class annotations therefore stay unknown rather than
-        # being silently converted into background targets.
-        for batch_index in range(src_logits.shape[0]):
-            frame_meta = self.frame_metadata[self._current_frame_idx] if self._current_frame_idx < len(self.frame_metadata) else {}
-            if self.label_mode == 'partial' or frame_meta.get('label_scope') == 'partial':
-                supervised = frame_meta.get('supervised_global_ids', [])
-                class_mask = torch.zeros(num_class, dtype=torch.bool, device=src_logits.device)
-                for global_id in supervised:
-                    matches = (select_id == int(global_id)).nonzero(as_tuple=False).flatten()
-                    if len(matches):
-                        class_mask[matches[0]] = True
-                valid[batch_index] = class_mask[None, :].expand(src_logits.shape[1], -1)
-
-        for batch_index, (src_idx, tgt_idx) in enumerate(indices):
-            keep = tgt_idx != -1
-            if not bool(keep.any()):
-                continue
-            for source_index, target_index in zip(src_idx[keep].tolist(), tgt_idx[keep].tolist()):
-                global_id = int(gt_instances[batch_index].labels[target_index])
-                matches = (select_id == global_id).nonzero(as_tuple=False).flatten()
-                if not len(matches):
+    def build_classification_targets(self, logits, select_id, gt_instances, indices, frame_metadata, label_mode):
+        """Build partial-label targets once for main and every auxiliary layer."""
+        batch, queries, columns = logits.shape
+        target = torch.zeros_like(logits)
+        valid = torch.zeros_like(logits, dtype=torch.bool)
+        weights = torch.ones_like(logits)
+        select_id = select_id.to(logits.device)
+        for batch_index in range(batch):
+            meta = frame_metadata[batch_index] if batch_index < len(frame_metadata) else {}
+            exhaustive = meta.get("exhaustive_global_ids", meta.get("supervised_global_ids", []))
+            if label_mode == "complete" and not exhaustive:
+                exhaustive = meta.get("active_global_ids", [])
+            for global_id in exhaustive:
+                columns_for_id = (select_id == int(global_id)).nonzero(as_tuple=False).flatten()
+                if len(columns_for_id):
+                    valid[batch_index, :, columns_for_id] = True
+            src_idx, tgt_idx = indices[batch_index]
+            for source_index, target_index in zip(src_idx.tolist(), tgt_idx.tolist()):
+                if int(target_index) < 0 or int(target_index) >= len(gt_instances[batch_index]):
                     continue
-                column = int(matches[0])
-                target[batch_index, source_index, column] = 1.0
-                valid[batch_index, source_index, column] = True
-                if gt_instances[batch_index].has('label_weights'):
-                    positive_weights[batch_index, source_index, column] = gt_instances[batch_index].label_weights[target_index].to(src_logits)
+                global_id = int(gt_instances[batch_index].labels[int(target_index)])
+                columns_for_id = (select_id == global_id).nonzero(as_tuple=False).flatten()
+                if not len(columns_for_id):
+                    raise ValueError("matched global ID %d is absent from select_id" % global_id)
+                column = int(columns_for_id[0])
+                target[batch_index, int(source_index), column] = 1.0
+                valid[batch_index, int(source_index), column] = True
+                if gt_instances[batch_index].has("label_weights"):
+                    value = float(gt_instances[batch_index].label_weights[int(target_index)].detach().item())
+                    weights[batch_index, int(source_index), column] = max(0.0, min(1.0, value))
+        return target, valid, weights
 
-        prob = src_logits.sigmoid()
-        ce = F.binary_cross_entropy_with_logits(src_logits, target, reduction='none')
-        p_t = prob * target + (1 - prob) * (1 - target)
-        ce = ce * ((1 - p_t) ** 2)
-        alpha_t = 0.25 * target + 0.75 * (1 - target)
-        ce = ce * alpha_t * positive_weights * valid.to(ce)
-        per_query = ce.sum(-1) / valid.to(ce).sum(-1).clamp(min=1)
-        loss_ce = per_query.sum() / num_boxes * src_logits.shape[1]
-        return {'loss_ce': loss_ce}
-    
+    def _apply_ignore_mask(self, valid, target, boxes, frame_metadata):
+        if not frame_metadata:
+            return valid
+        boxes_xyxy = box_ops.box_cxcywh_to_xyxy(boxes.detach()).clamp(0, 1)
+        for batch_index, meta in enumerate(frame_metadata):
+            image_size = meta.get("image_size", [1, 1])
+            ih, iw = float(image_size[0]), float(image_size[1])
+            for region in meta.get("ignore_regions", []):
+                values = region.get("bbox_xyxy", [])
+                if len(values) != 4 or iw <= 0 or ih <= 0:
+                    continue
+                region_box = torch.tensor([values[0] / iw, values[1] / ih, values[2] / iw, values[3] / ih], device=boxes.device)
+                ix0 = torch.maximum(boxes_xyxy[batch_index, :, 0], region_box[0])
+                iy0 = torch.maximum(boxes_xyxy[batch_index, :, 1], region_box[1])
+                ix1 = torch.minimum(boxes_xyxy[batch_index, :, 2], region_box[2])
+                iy1 = torch.minimum(boxes_xyxy[batch_index, :, 3], region_box[3])
+                inter = (ix1 - ix0).clamp(min=0) * (iy1 - iy0).clamp(min=0)
+                area = (boxes_xyxy[batch_index, :, 2] - boxes_xyxy[batch_index, :, 0]).clamp(min=0) * (boxes_xyxy[batch_index, :, 3] - boxes_xyxy[batch_index, :, 1]).clamp(min=0)
+                rarea = max(0.0, float(values[2] - values[0])) / iw * max(0.0, float(values[3] - values[1])) / ih
+                iou = inter / (area + rarea - inter).clamp(min=1e-6)
+                valid[batch_index, iou >= 0.5] &= target[batch_index, iou >= 0.5] > 0
+        return valid
+
+    def loss_labels(self, outputs, gt_instances: List[Instances], indices, num_boxes, log=False):
+        logits = outputs["pred_logits"]
+        target, valid, positive_weights = self.build_classification_targets(
+            logits, outputs["select_id"], gt_instances, indices,
+            [self._frame_metadata()] if logits.shape[0] == 1 else self.frame_metadata,
+            self.label_mode,
+        )
+        valid = self._apply_ignore_mask(valid, target, outputs["pred_boxes"],
+                                        [self._frame_metadata()] if logits.shape[0] == 1 else self.frame_metadata)
+        prob = logits.sigmoid()
+        ce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+        p_t = prob * target + (1.0 - prob) * (1.0 - target)
+        alpha_t = 0.25 * target + 0.75 * (1.0 - target)
+        elementwise = alpha_t * (1.0 - p_t).pow(2) * ce
+        # Return numerator.  OVFrameMatcher.forward applies the common
+        # detection normalizer once; there is intentionally no Q factor.
+        return {"loss_ce": (elementwise * valid.to(elementwise) * positive_weights).sum()}
+
     def loss_boxes(self, outputs, gt_instances: List[Instances], indices: List[tuple], num_boxes):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
            targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
@@ -305,20 +358,25 @@ class OVFrameMatcher(SetCriterion):
                 'loss_giou': outputs['pred_boxes'].sum() * 0,
             }
 
-        loss_bbox = F.l1_loss(src_boxes[mask], target_boxes[mask], reduction='none')
-        loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
+        target_weights = torch.ones((len(target_boxes),), device=target_boxes.device)
+        for offset, (gt_per_img, (_, target_index)) in enumerate(zip(gt_instances, indices)):
+            if gt_per_img.has("label_weights"):
+                target_weights[offset:offset + len(target_index)] = gt_per_img.label_weights[target_index].to(target_weights)
+        target_weights = target_weights[mask]
+        loss_bbox = F.l1_loss(src_boxes[mask], target_boxes[mask], reduction='none') * target_weights[:, None]
+        loss_giou = (1 - torch.diag(box_ops.generalized_box_iou(
             box_ops.box_cxcywh_to_xyxy(src_boxes[mask]),
-            box_ops.box_cxcywh_to_xyxy(target_boxes[mask])))
+            box_ops.box_cxcywh_to_xyxy(target_boxes[mask]))) * target_weights)
 
         losses = {}
-        losses['loss_bbox'] = loss_bbox.sum() / num_boxes
-        losses['loss_giou'] = loss_giou.sum() / num_boxes
+        losses['loss_bbox'] = loss_bbox.sum()
+        losses['loss_giou'] = loss_giou.sum()
 
         return losses
 
     def loss_motion(self, outputs, targets, indices, num_boxes):
         """Supervise causal inverse-sigmoid deltas using the next GT frame."""
-        motion = outputs.get('motion_delta')
+        motion = outputs.get('motion_velocity')
         if motion is None:
             return {'loss_motion': outputs['pred_boxes'].sum() * 0}
         next_index = self._current_frame_idx + 1
@@ -326,7 +384,20 @@ class OVFrameMatcher(SetCriterion):
             return {'loss_motion': motion.sum() * 0}
         current_gt = self.gt_instances[self._current_frame_idx]
         next_gt = self.gt_instances[next_index]
-        next_by_id = {int(value): index for index, value in enumerate(next_gt.obj_ids.tolist()) if int(value) >= 0}
+        current_meta = self._frame_metadata(self._current_frame_idx)
+        next_meta = self._frame_metadata(next_index)
+        current_time = current_meta.get("timestamp_s")
+        next_time = next_meta.get("timestamp_s")
+        max_dt = float(current_meta.get("max_motion_dt", 2.0))
+        if current_time is None or next_time is None:
+            return {'loss_motion': motion.sum() * 0}
+        dt = float(next_time) - float(current_time)
+        if not math.isfinite(dt) or dt <= 0 or dt > max_dt:
+            return {'loss_motion': motion.sum() * 0}
+        next_by_id = {
+            int(value): index for index, value in enumerate(next_gt.obj_ids.tolist())
+            if int(value) >= 0 and (not next_gt.has("label_sources") or int(next_gt.label_sources[index]) in (0, 1))
+        }
         predicted = []
         expected = []
         matched_sources, matched_targets = indices[0]
@@ -335,16 +406,19 @@ class OVFrameMatcher(SetCriterion):
             target_idx = int(target_idx)
             if target_idx < 0 or target_idx >= len(current_gt):
                 continue
+            if current_gt.has("label_sources") and int(current_gt.label_sources[target_idx]) not in (0, 1):
+                continue
             object_id = int(current_gt.obj_ids[target_idx])
             if object_id not in next_by_id:
                 continue
             current_box = current_gt.boxes[target_idx].to(motion)
             next_box = next_gt.boxes[next_by_id[object_id]].to(motion)
-            expected.append(inverse_sigmoid(next_box) - inverse_sigmoid(current_box))
+            expected.append((inverse_sigmoid(next_box) - inverse_sigmoid(current_box)) / dt)
             predicted.append(motion[0, source_idx])
         if not predicted:
             return {'loss_motion': motion.sum() * 0}
-        return {'loss_motion': F.smooth_l1_loss(torch.stack(predicted), torch.stack(expected), reduction='sum') / num_boxes}
+        self.motion_pairs += len(predicted)
+        return {'loss_motion': F.smooth_l1_loss(torch.stack(predicted), torch.stack(expected), reduction='sum')}
 
     def loss_align(self, outputs, targets, indices, num_boxes, l1_distillation=False):
         """Alignment mechanism guides generalization capabilities and aligned queries.
@@ -363,10 +437,12 @@ class OVFrameMatcher(SetCriterion):
         select_id = outputs["select_id"]
         image_feat = outputs["image_feat"]
         target_feature = []
+        target_weights = []
         for t, (_, i) in zip(targets, indices):
-            for c in t.labels[i]:
+            for position, c in zip(i.tolist(), t.labels[i]):
                 index = (select_id == c).nonzero(as_tuple=False)[0]
                 target_feature.append(image_feat[int(index.item())])
+                target_weights.append(float(t.label_weights[position].item()) if t.has("label_weights") else 1.0)
         if not target_feature:
             return {"loss_align": outputs["pred_logits"].sum() * 0}
         target_feature = torch.stack(target_feature, dim=0)
@@ -376,9 +452,9 @@ class OVFrameMatcher(SetCriterion):
             loss_feature = F.l1_loss(src_feature, target_feature, reduction="none")
         else:
             loss_feature = F.mse_loss(src_feature, target_feature, reduction="none")
-        losses = {"loss_align": loss_feature.sum() / num_boxes}
+        losses = {"loss_align": (loss_feature * torch.as_tensor(target_weights, device=loss_feature.device)[:, None]).sum()}
         return losses
-    
+
     def loss_align_pre(self, outputs, targets, indices, num_boxes):
         """Preserve text features without sudden variations.
         """
@@ -400,7 +476,7 @@ class OVFrameMatcher(SetCriterion):
                     tgt_ids.append(index)
                 tgt_ids = torch.cat(tgt_ids)
             tgt_ids_all.append(tgt_ids)
-        
+
         input_feats = torch.cat([input_feat[i] for i in tgt_ids_all])
         encoder_embeds = outputs["text_embed"][:, embed_bs_index]
 
@@ -414,9 +490,9 @@ class OVFrameMatcher(SetCriterion):
         loss_encoder_align = loss_feature_all.sum()
         losses = {"loss_align_pre": loss_encoder_align}
         return losses
-    
+
     def match_for_single_frame(self, outputs: dict, is_first=None):
-        outputs_without_aux = {k: v for k, v in outputs.items() if 
+        outputs_without_aux = {k: v for k, v in outputs.items() if
                                k != 'aux_outputs' and k != 'enc_outputs'}
 
         def select_unmatched_indexes(matched_indexes: torch.Tensor, num_total_indexes: int) -> torch.Tensor:
@@ -446,7 +522,7 @@ class OVFrameMatcher(SetCriterion):
             'pred_embed': outputs_without_aux['pred_embed'][0, keep_indices].unsqueeze(0),
             'select_id':outputs_without_aux['select_id'],
             'image_feat':outputs_without_aux['image_feat'],
-            'motion_delta': outputs_without_aux.get('motion_delta', None)[0, keep_indices].unsqueeze(0) if outputs_without_aux.get('motion_delta', None) is not None else None,
+            'motion_velocity': outputs_without_aux.get('motion_velocity', None)[0, keep_indices].unsqueeze(0) if outputs_without_aux.get('motion_velocity', None) is not None else None,
         }
 
         obj_idxes = gt_instances_i.obj_ids
@@ -455,6 +531,8 @@ class OVFrameMatcher(SetCriterion):
         obj_idx_to_gt_idx = {obj_idx: gt_idx for gt_idx, obj_idx in enumerate(obj_idxes_list)}
 
         # step1. inherit and update the previous tracks.
+        frame_meta = self._frame_metadata()
+        exhaustive_ids = {int(v) for v in frame_meta.get("exhaustive_global_ids", frame_meta.get("supervised_global_ids", []))}
         num_disappear_track = 0
         track_instances.matched_gt_idxes[:] = -1
         valid_track_mask = track_instances.obj_idxes >= 0
@@ -464,11 +542,11 @@ class OVFrameMatcher(SetCriterion):
             obj_id = valid_obj_idxes[j].item()
             if obj_id in obj_idx_to_gt_idx:
                 track_instances.matched_gt_idxes[valid_track_idxes[j]] = obj_idx_to_gt_idx[obj_id]
-            else:
+            elif exhaustive_ids:
                 num_disappear_track += 1
 
         full_track_idxes = torch.arange(len(track_instances), dtype=torch.long, device=device)
-        matched_track_idxes = (track_instances.obj_idxes >= 0) # occu 
+        matched_track_idxes = (track_instances.obj_idxes >= 0) # occu
         prev_matched_indices = torch.stack(
             [full_track_idxes[matched_track_idxes], track_instances.matched_gt_idxes[matched_track_idxes]], dim=1).to(device)
 
@@ -476,35 +554,48 @@ class OVFrameMatcher(SetCriterion):
         # note that the fp tracks (obj_idxes == -2) will not be selected here.
         unmatched_track_idxes = full_track_idxes[track_instances.obj_idxes == -1]
 
-        # step3. select the unmatched gt instances (new tracks).
+        # step3. select unmatched targets.  Real GT is matched before PL so a
+        # low-confidence pseudo target cannot take a query from new-class GT.
         tgt_indexes = track_instances.matched_gt_idxes
         tgt_indexes = tgt_indexes[tgt_indexes != -1]
-
         unmatched_tgt_indexes = select_unmatched_indexes(tgt_indexes, len(gt_instances_i))
-        unmatched_gt_instances = gt_instances_i[unmatched_tgt_indexes]
+        if gt_instances_i.has("label_sources"):
+            gt_target_indexes = unmatched_tgt_indexes[gt_instances_i.label_sources[unmatched_tgt_indexes] != 2]
+            pl_target_indexes = unmatched_tgt_indexes[gt_instances_i.label_sources[unmatched_tgt_indexes] == 2]
+        else:
+            gt_target_indexes, pl_target_indexes = unmatched_tgt_indexes, torch.empty(0, dtype=torch.long, device=device)
 
-        def match_for_single_decoder_layer(unmatched_outputs, matcher, unmatched_track_idxes):
-            if len(unmatched_track_idxes) == 0 or len(unmatched_tgt_indexes) == 0:
-                return torch.empty((0, 2), dtype=torch.long, device=device)
-            new_track_indices = matcher(unmatched_outputs,
-                                             [unmatched_gt_instances])
-
-            # map the matched pair indexes to original index-space.
-            src_idx = new_track_indices[0][0]
-            tgt_idx = new_track_indices[0][1]
-            # concat src and tgt for loss calculation.
-            new_matched_indices = torch.stack([unmatched_track_idxes[src_idx], unmatched_tgt_indexes[tgt_idx]],
-                                              dim=1).to(device)
-            return new_matched_indices
+        def match_for_single_decoder_layer(unmatched_outputs, unmatched_track_idxes):
+            matches = []
+            available_queries = unmatched_track_idxes
+            for target_indexes in (gt_target_indexes, pl_target_indexes):
+                if len(available_queries) == 0 or len(target_indexes) == 0:
+                    continue
+                subset_targets = gt_instances_i[target_indexes]
+                subset_outputs = {
+                    "pred_logits": unmatched_outputs["pred_logits"][:, available_queries],
+                    "pred_boxes": unmatched_outputs["pred_boxes"][:, available_queries],
+                    "select_id": unmatched_outputs["select_id"],
+                }
+                local_indices = self.matcher(subset_outputs, [subset_targets])[0]
+                if len(local_indices[0]) == 0:
+                    continue
+                source = available_queries[local_indices[0]]
+                target = target_indexes[local_indices[1]]
+                matches.append(torch.stack([source, target], dim=1).to(device))
+                keep = torch.ones(len(available_queries), dtype=torch.bool, device=device)
+                keep[local_indices[0]] = False
+                available_queries = available_queries[keep]
+            return torch.cat(matches, dim=0) if matches else torch.empty((0, 2), dtype=torch.long, device=device)
 
         # step4. do matching between the unmatched slots and GTs.
         unmatched_outputs = {
-            'pred_logits': track_instances.pred_logits[unmatched_track_idxes].unsqueeze(0),
-            'pred_boxes': track_instances.pred_boxes[unmatched_track_idxes].unsqueeze(0),
+            'pred_logits': track_instances.pred_logits.unsqueeze(0),
+            'pred_boxes': track_instances.pred_boxes.unsqueeze(0),
             'select_id':outputs_without_aux['select_id'],
         }
 
-        new_matched_indices = match_for_single_decoder_layer(unmatched_outputs, self.matcher, unmatched_track_idxes)
+        new_matched_indices = match_for_single_decoder_layer(unmatched_outputs, unmatched_track_idxes)
 
         # step5. update obj_idxes according to the new matching result.
         track_instances.obj_idxes[new_matched_indices[:, 0]] = gt_instances_i.obj_ids[new_matched_indices[:, 1]].long()
@@ -520,7 +611,7 @@ class OVFrameMatcher(SetCriterion):
             track_instances.iou[active_idxes] = matched_boxlist_iou(Boxes(active_track_boxes), Boxes(gt_boxes))
 
         # step7. merge the unmatched pairs and the matched pairs.
-        matched_indices = torch.cat([new_matched_indices, prev_matched_indices], dim=0) 
+        matched_indices = torch.cat([new_matched_indices, prev_matched_indices], dim=0)
 
         # step8. calculate losses.
         self.num_samples += len(gt_instances_i) + num_disappear_track
@@ -552,31 +643,32 @@ class OVFrameMatcher(SetCriterion):
                         device=track_instances_last.obj_idxes.device)
                     track_instances_layer = track_instances_last
 
-                # step1*. inherit and update the previous tracks.
-                track_instances_layer.matched_gt_idxes[:] = -1
+                # step1*. compute inherited matches in a private tensor.  An
+                # auxiliary layer must not mutate the main track state.
+                layer_matched_gt = torch.full((len(track_instances_layer),), -1, dtype=torch.long, device=device)
                 valid_track_mask = track_instances_layer.obj_idxes >= 0
                 valid_track_idxes = torch.arange(len(track_instances_layer), device=device)[valid_track_mask]
                 valid_obj_idxes = track_instances_layer.obj_idxes[valid_track_idxes]
                 for j in range(len(valid_obj_idxes)):
                     obj_id = valid_obj_idxes[j].item()
                     if obj_id in obj_idx_to_gt_idx:
-                        track_instances_layer.matched_gt_idxes[valid_track_idxes[j]] = obj_idx_to_gt_idx[obj_id]
+                        layer_matched_gt[valid_track_idxes[j]] = obj_idx_to_gt_idx[obj_id]
 
                 full_track_idxes = torch.arange(len(track_instances_layer), dtype=torch.long, device=device)
                 matched_track_idxes_layer = (track_instances_layer.obj_idxes >= 0)
                 prev_matched_indices_layer = torch.stack(
-                    [full_track_idxes[matched_track_idxes_layer], track_instances_layer.matched_gt_idxes[matched_track_idxes_layer]], dim=1).to(device)
+                    [full_track_idxes[matched_track_idxes_layer], layer_matched_gt[matched_track_idxes_layer]], dim=1).to(device)
 
                 # step2*. select the unmatched slots.
                 unmatched_track_idxes_layer = full_track_idxes[track_instances_layer.obj_idxes == -1]
 
                 # step3*. do matching between the unmatched slots and GTs.
                 unmatched_outputs_layer = {
-                    'pred_logits': aux_outputs['pred_logits'][0, _keep_indices_layer][unmatched_track_idxes_layer].unsqueeze(0),
-                    'pred_boxes': aux_outputs['pred_boxes'][0, _keep_indices_layer][unmatched_track_idxes_layer].unsqueeze(0),
+                    'pred_logits': aux_outputs['pred_logits'][0, _keep_indices_layer].unsqueeze(0),
+                    'pred_boxes': aux_outputs['pred_boxes'][0, _keep_indices_layer].unsqueeze(0),
                     'select_id': aux_outputs['select_id'],
                 }
-                new_matched_indices_layer = match_for_single_decoder_layer(unmatched_outputs_layer, self.matcher, unmatched_track_idxes_layer)
+                new_matched_indices_layer = match_for_single_decoder_layer(unmatched_outputs_layer, unmatched_track_idxes_layer)
 
                 # step4*. merge the unmatched pairs and the matched pairs.
                 matched_indices_layer = torch.cat([new_matched_indices_layer, prev_matched_indices_layer], dim=0)
@@ -590,6 +682,8 @@ class OVFrameMatcher(SetCriterion):
                     'image_feat': aux_outputs['image_feat'],
                 }
                 for loss in self.losses:
+                    if loss == "motion":
+                        continue
                     l_dict = self.get_loss(loss,
                                            _keep_aux_outputs,
                                            gt_instances=[gt_instances_i],
@@ -598,18 +692,19 @@ class OVFrameMatcher(SetCriterion):
                     self.losses_dict.update(
                         {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
                          l_dict.items()})
-            
+
         self._step()
         return track_instances
 
     def forward(self, outputs):
         losses = outputs.pop("losses_dict")
-        num_samples = self.get_num_boxes(self.num_samples)
+        normalizer_det = self.get_num_boxes(max(1, self.num_samples))
+        normalizer_motion = max(1, int(self.motion_pairs))
         loss_avg = {}
         for loss_name, _ in losses.items():
-            loss_avg[loss_name] = losses[loss_name] / num_samples
+            loss_avg[loss_name] = losses[loss_name] / (normalizer_motion if "loss_motion" in loss_name else normalizer_det)
         return loss_avg
-    
+
 
 class OVTR(nn.Module):
     def __init__(self, backbone, transformer, num_feature_levels, criterion, track_embed,
@@ -630,6 +725,13 @@ class OVTR(nn.Module):
                     class_registry=None,
                     semantic_bank=None,
                     continual_cfg=None,
+                    motion_velocity_limit=1.25,
+                    motion_warmup_steps=20,
+                    motion_detach_features=True,
+                    motion_detach_reference=True,
+                    motion_max_dt=2.0,
+                    inference_dedup_enabled=True,
+                    duplicate_iou=0.9,
                  ):
         """ Initializes the model.
         Parameters:
@@ -648,7 +750,7 @@ class OVTR(nn.Module):
         self.track_embed = track_embed
         self.transformer = transformer
         hidden_dim = transformer.d_model
-     
+
         self.max_pad_len = max_len
         if text_embeddings is None:
             raise ValueError("text_embeddings are required for OVTR")
@@ -658,6 +760,24 @@ class OVTR(nn.Module):
         self.semantic_bank = semantic_bank
         self.continual_cfg = continual_cfg or {}
         self.motion_mode = self.continual_cfg.get("motion_mode", "none")
+        self.motion_velocity_limit = float(motion_velocity_limit)
+        self.motion_warmup_steps = int(motion_warmup_steps)
+        self.motion_detach_features = bool(motion_detach_features)
+        self.motion_detach_reference = bool(motion_detach_reference)
+        self.motion_max_dt = float(motion_max_dt)
+        self.motion_training_step = 0
+        self.inference_dedup_enabled = bool(inference_dedup_enabled)
+        self.duplicate_iou = float(duplicate_iou)
+        self.runtime_stats = {
+            "input_detection_queries": 0,
+            "active_track_count": 0,
+            "suppressed_duplicate_count": 0,
+            "new_id_count": 0,
+            "output_box_count": 0,
+            "track_capacity_hits": 0,
+            "invalid_dt_count": 0,
+            "motion_advance_count": 0,
+        }
         self.patch2query = nn.Linear(512, 256)
         self.all_ids = torch.tensor(range(self.text_embeddings.shape[-1]))
         self.all_ids = [i + 1 for i in self.all_ids]
@@ -668,11 +788,11 @@ class OVTR(nn.Module):
         self.frequency_eval = torch.tensor(Frequency_list_total_1, dtype=torch.float32, device='cpu')
         self.novel_cls_cpu = novel_cls_cpu
         self.computed_aux = computed_aux
-   
+
         for layer in [self.patch2query]:
             nn.init.xavier_uniform_(self.patch2query.weight)
             nn.init.constant_(self.patch2query.bias, 0)
-        
+
         # feature alignment
         self.feature_align = nn.Linear(256, 512) # alignment head
         nn.init.xavier_uniform_(self.feature_align.weight)
@@ -684,7 +804,11 @@ class OVTR(nn.Module):
             self.feature_align = nn.ModuleList([self.feature_align for _ in range(num_pred)])
 
         if self.motion_mode != "none":
-            self.motion_head = CausalMotionHead(hidden_dim, self.text_embeddings.shape[0], mode=self.motion_mode)
+            self.motion_head = CausalMotionHead(
+                hidden_dim, self.text_embeddings.shape[0], mode=self.motion_mode,
+                velocity_limit=self.motion_velocity_limit,
+                detach_features=self.motion_detach_features,
+            )
 
         # bbox
         _bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
@@ -698,7 +822,7 @@ class OVTR(nn.Module):
             ]
         self.bbox_embed = nn.ModuleList(box_embed_layerlist)
         self.transformer.decoder.bbox_embed = self.bbox_embed
-        
+
         if two_stage:
             if two_stage_bbox_embed_share:
                 assert dec_pred_bbox_embed_share
@@ -734,7 +858,7 @@ class OVTR(nn.Module):
         self.aux_loss = aux_loss
         self.with_box_refine = with_box_refine
         self.two_stage = two_stage
-        
+
         for proj in self.input_proj:
             nn.init.xavier_uniform_(proj[0].weight, gain=1)
             nn.init.constant_(proj[0].bias, 0)
@@ -754,7 +878,7 @@ class OVTR(nn.Module):
             maximum_quantity=self.continual_cfg.get("maximum_quantity", 50),
         )
         self.ious_thresh = float(self.continual_cfg.get("ious_thresh", 0.3))
-        
+
         self.use_checkpoint = use_checkpoint
         self.distribution_based_sampling = distribution_based_sampling
         self.criterion = criterion
@@ -778,13 +902,50 @@ class OVTR(nn.Module):
         track_instances.scores = torch.zeros((num_queries,), dtype=torch.float, device=device)
         track_instances.pred_boxes = torch.zeros((num_queries, 4), dtype=torch.float, device=device)
         track_instances.pred_logits = torch.zeros((num_queries, cls_pad_len), dtype=torch.float, device=device)
+        track_instances.suppressed_this_frame = torch.zeros((num_queries,), dtype=torch.bool, device=device)
+        track_instances.last_timestamp_s = torch.full((num_queries,), float("nan"), dtype=torch.float32, device=device)
+        track_instances.motion_valid = torch.zeros((num_queries,), dtype=torch.bool, device=device)
         if self.motion_mode != "none":
-            track_instances.motion_delta = torch.zeros((num_queries, 4), device=device)
+            track_instances.motion_velocity = torch.zeros((num_queries, 4), device=device)
 
         if not self.training:
             track_instances.cls_idxes = torch.full((num_queries,), -1, dtype=torch.long, device=device)
             track_instances.disappear_time = torch.zeros((num_queries, ), dtype=torch.long, device=device)
         return track_instances.to(device)
+
+    def set_training_step(self, step: int):
+        self.motion_training_step = int(step)
+
+    def _advance_motion_references(self, track_instances, current_timestamp_s):
+        """Apply a detached velocity once before the current transformer call."""
+        if self.motion_mode == "none" or not track_instances.has("motion_velocity"):
+            return track_instances
+        timestamp = current_timestamp_s
+        base = inverse_sigmoid(track_instances.pred_boxes[:, :4].detach().clamp(1e-5, 1.0 - 1e-5))
+        valid = track_instances.motion_valid & (track_instances.obj_idxes >= 0)
+        if timestamp is None:
+            track_instances.ref_pts = base
+            self.runtime_stats["invalid_dt_count"] += int(valid.sum().item())
+            return track_instances
+        current = torch.full_like(track_instances.last_timestamp_s, float(timestamp))
+        dt = current - track_instances.last_timestamp_s
+        usable = valid & torch.isfinite(dt) & (dt > 0) & (dt <= self.motion_max_dt)
+        if not bool(usable.any()):
+            track_instances.ref_pts = base
+            self.runtime_stats["invalid_dt_count"] += int(valid.sum().item())
+            return track_instances
+        gate = 0.0 if self.training and self.motion_training_step <= self.motion_warmup_steps else 1.0
+        ref = base.clone()
+        velocity = track_instances.motion_velocity.detach() if self.motion_detach_reference else track_instances.motion_velocity
+        ref[usable] = base[usable] + gate * velocity[usable] * dt[usable, None]
+        track_instances.ref_pts = ref
+        self.runtime_stats["motion_advance_count"] += int(usable.sum().item())
+        return track_instances
+
+    def consume_runtime_stats(self):
+        value = dict(self.runtime_stats)
+        self.runtime_stats = {key: 0 for key in self.runtime_stats}
+        return value
 
     def clear(self):
         self.track_base.clear()
@@ -796,7 +957,7 @@ class OVTR(nn.Module):
         # as a dict having both a Tensor and a list.
         return [{'pred_logits': a, 'pred_boxes': b, 'pred_embed':c}
                 for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], outputs_embed[:-1])]
-        
+
     def _distribution_based_sampling(self, pad_len, uniq_labels=None):
         frequency = self.frequency.clone()
         frequency[uniq_labels] = 0
@@ -804,7 +965,7 @@ class OVTR(nn.Module):
         extra_labels = extra_labels[torch.isin(extra_labels,self.novel_cls_cpu, invert=True)]
         extra_labels = extra_labels[torch.randperm(len(extra_labels))]
         return extra_labels
-    
+
     def get_select_id(self, cls_num, labels_list, extra_labels, is_first):
         if self.class_registry is not None:
             select_id = list(self.class_registry.active_select_ids())
@@ -813,7 +974,7 @@ class OVTR(nn.Module):
             return select_id, None
         max_pad_len = max(cls_num, self.max_pad_len)
         # get input categories
-        uniq_labels = torch.unique(labels_list).to("cpu")    
+        uniq_labels = torch.unique(labels_list).to("cpu")
         if is_first: # first frame detection
             if len(uniq_labels) < max_pad_len:
                 pad_len = max_pad_len - len(uniq_labels)
@@ -840,9 +1001,11 @@ class OVTR(nn.Module):
             elif len(select_id) > max_pad_len:
                 select_id = select_id[:max_pad_len]
         return select_id, extra_labels
-    
-    def _forward_single_image(self, samples, track_instances: Instances, targets=None, extra_labels=None ,is_first=True, cls_num=0):
-        features, pos = self.backbone(samples)      
+
+    def _forward_single_image(self, samples, track_instances: Instances, targets=None, extra_labels=None ,is_first=True, cls_num=0, *, frame_context=None):
+        if frame_context is not None and not is_first:
+            self._advance_motion_references(track_instances, frame_context.get("timestamp_s"))
+        features, pos = self.backbone(samples)
         src, mask = features[-1].decompose()
         assert mask is not None
         srcs = []
@@ -914,9 +1077,9 @@ class OVTR(nn.Module):
         outputs_class = pre_outputs_classes
         outputs_coord = torch.stack(outputs_coords)
         outputs_embed = torch.stack(outputs_embeds)
-        motion_delta = None
+        motion_velocity = None
         if self.motion_mode != "none":
-            motion_delta = self.motion_head(
+            motion_velocity = self.motion_head(
                 hs_ofa[-1], outputs_coord[-1], outputs_class[-1], select_id, self.text_embeddings)
 
         if init_reference.shape[-1]==4:
@@ -924,28 +1087,28 @@ class OVTR(nn.Module):
         else:
             ref_pts_all = torch.cat([init_reference[None], inter_references[:, :, :, :2]], dim=0)
         out = {
-            'pred_logits': outputs_class[-1], 
-            'pred_boxes': outputs_coord[-1], 
+            'pred_logits': outputs_class[-1],
+            'pred_boxes': outputs_coord[-1],
             'ref_pts': ref_pts_all[-2],
             "pred_embed": outputs_embed[-1],
             "select_id": select_id,
             "image_feat": image_feat_ori,
             "extra_labels": extra_labels,
-            "motion_delta": motion_delta,
+            "motion_velocity": motion_velocity,
             }
-            
+
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord, outputs_embed)
             for temp in out["aux_outputs"]:
                 temp["select_id"] = select_id
                 temp["image_feat"] = image_feat_ori
-            
+
         out['query_pos_track'] = query_pos_track.transpose(0, 1)
         out['hs_ofa'] = hs_ofa[-1]
         out['hs_cti'] = hs_cti[-1]
         return out
-     
-    def _post_process_single_image(self, frame_res, track_instances, is_last, is_repeat=None, is_first=False, target_size=None):
+
+    def _post_process_single_image(self, frame_res, track_instances, is_last, is_repeat=None, is_first=False, target_size=None, *, frame_context=None):
         with torch.no_grad():
             track_scores = frame_res['pred_logits'][0, :].sigmoid().max(dim=-1).values
 
@@ -955,8 +1118,9 @@ class OVTR(nn.Module):
         track_instances.output_embedding_txt = frame_res['hs_cti'][0]
         track_instances.output_embedding_img = frame_res['hs_ofa'][0]
         track_instances.query_pos = frame_res["query_pos_track"][0]
-        if frame_res.get('motion_delta') is not None:
-            track_instances.motion_delta = frame_res['motion_delta'][0]
+        if frame_res.get('motion_velocity') is not None:
+            track_instances.motion_velocity = frame_res['motion_velocity'][0]
+        track_instances.suppressed_this_frame = torch.zeros_like(track_instances.obj_idxes, dtype=torch.bool)
 
         if self.training:
             # the track id will be assigned by the mather.
@@ -965,13 +1129,34 @@ class OVTR(nn.Module):
         else:
             _track_discard = torch.zeros(
                 0, dtype=torch.long, device=track_instances.scores.device)
-            if self.train_with_artificial_img_seqs:
-                track_instances, _track_discard = protect_track_preds(track_instances, num_queries=self.num_queries, miss_tolerance=self.track_base.miss_tolerance, ious_thresh=self.ious_thresh) 
+            # Resolve global semantic IDs before duplicate protection; the
+            # protection rule is same-class only and must not use the
+            # initial -1 placeholders.
             track_instances = self.post_process_pre(track_instances, frame_res['select_id'], is_first)
+            self.runtime_stats["input_detection_queries"] += int(min(self.num_queries, len(track_instances)))
+            if self.inference_dedup_enabled:
+                track_instances, dedup_stats = protect_track_preds(
+                    track_instances, num_queries=self.num_queries,
+                    duplicate_iou=self.duplicate_iou,
+                )
+                self.runtime_stats["suppressed_duplicate_count"] += int(dedup_stats.get("suppressed", 0))
             # each track will be assigned an unique global id by the track base.
             if is_first:
                 self.track_base.clear()
+            old_max_obj_id = int(self.track_base.max_obj_id)
             track_instances = self.track_base.update(track_instances, _track_discard, is_repeat=is_repeat)
+            self.runtime_stats["new_id_count"] += int(self.track_base.max_obj_id - old_max_obj_id)
+            self.runtime_stats["active_track_count"] += int((track_instances.obj_idxes >= 0).sum().item())
+            if len(track_instances) >= self.track_base.maximum_quantity:
+                self.runtime_stats["track_capacity_hits"] += 1
+
+        if frame_context is not None and frame_context.get("timestamp_s") is not None:
+            timestamp = float(frame_context["timestamp_s"])
+            track_instances.last_timestamp_s = torch.full_like(track_instances.last_timestamp_s, timestamp)
+            if track_instances.has("motion_valid"):
+                track_instances.motion_valid = track_instances.obj_idxes >= 0
+        if track_instances.has("suppressed_this_frame"):
+            self.runtime_stats["output_box_count"] += int(((track_instances.obj_idxes >= 0) & (~track_instances.suppressed_this_frame)).sum().item())
 
         tmp = {}
         tmp['init_track_instances'] = self._generate_empty_tracks(cls_pad_len=track_instances.pred_logits.shape[1])
@@ -984,13 +1169,13 @@ class OVTR(nn.Module):
             frame_res['track_instances'] = None
         frame_res['track_instances_pre'] = track_instances
         return frame_res
-    
+
     def post_process_pre(self, track_instances, select_id, is_first):
         out_logits = track_instances.pred_logits
 
         prob = out_logits.sigmoid()
         scores, labels = prob.max(-1)
- 
+
         track_instances.scores = scores
         cur_cls_idxes = select_id[labels]
         # track_instances.keep_cls = torch.eq(cur_cls_idxes, track_instances.cls_idxes)
@@ -1011,14 +1196,14 @@ class OVTR(nn.Module):
         else:
             is_first = False
 
-        res = self._forward_single_image(img, track_instances, None, extra_labels, is_first, cls_num=None)
-        res = self._post_process_single_image(res, track_instances, False, is_repeat=is_repeat, is_first=is_first, target_size=ori_img_size[:-1])
+        res = self._forward_single_image(img, track_instances, None, extra_labels, is_first, cls_num=None, frame_context={"timestamp_s": None})
+        res = self._post_process_single_image(res, track_instances, False, is_repeat=is_repeat, is_first=is_first, target_size=ori_img_size[:-1], frame_context={"timestamp_s": None})
 
         track_instances = res['track_instances']
         track_instances = self.post_process(track_instances, ori_img_size[:-1])
         ret = {'track_instances': track_instances}
         if 'ref_pts' in res:
-            ref_pts = res['ref_pts'] 
+            ref_pts = res['ref_pts']
             img_h, img_w = ori_img_size[:-1]
             # scale_fct = torch.Tensor([img_w, img_h]).to(ref_pts)
             scale_fct = torch.Tensor([img_w, img_h, img_w, img_h]).to(ref_pts)
@@ -1047,10 +1232,10 @@ class OVTR(nn.Module):
             h, w = frame_tensor.shape[-2:]
             target_size = (h, w)
         res = self._forward_single_image(
-            img, runtime_state, None, None, is_first, cls_num=None)
+            img, runtime_state, None, None, is_first, cls_num=None, frame_context=frame_context)
         res = self._post_process_single_image(
             res, runtime_state, is_last=False, is_first=is_first,
-            target_size=target_size)
+            target_size=target_size, frame_context=frame_context)
         next_state = res["track_instances"]
         export_state = copy.deepcopy(next_state)
         exported = self.post_process(export_state, target_size)
@@ -1061,6 +1246,8 @@ class OVTR(nn.Module):
         }
         for i in range(len(exported)):
             if int(exported.obj_idxes[i]) < 0:
+                continue
+            if exported.has("suppressed_this_frame") and bool(exported.suppressed_this_frame[i]):
                 continue
             global_id = int(exported.cls_idxes[i]) if exported.has("cls_idxes") else int(exported.labels[i])
             prediction_record["predictions"].append({
@@ -1097,7 +1284,7 @@ class OVTR(nn.Module):
                 def fn(frame, *args):
                     frame = nested_tensor_from_tensor_list([frame])
                     tmp = Instances((1, 1), **dict(zip(keys, args)))
-                    frame_res = self._forward_single_image(frame, tmp, targets, extra_labels, is_first, cls_num)
+                    frame_res = self._forward_single_image(frame, tmp, targets, extra_labels, is_first, cls_num, frame_context=None)
                     return (
                         frame_res['pred_logits'],
                         frame_res['pred_boxes'],
@@ -1115,7 +1302,7 @@ class OVTR(nn.Module):
                         *[aux['select_id'] for aux in frame_res['aux_outputs']],
                         *[aux['image_feat'] for aux in frame_res['aux_outputs']],
                     )
-                args = [frame] + [track_instances.get(k) for k in keys] 
+                args = [frame] + [track_instances.get(k) for k in keys]
                 params = tuple((p for p in self.parameters() if p.requires_grad))
                 tmp = checkpoint.CheckpointFunction.apply(fn, len(args), *args, *params)
                 frame_res = {
@@ -1139,9 +1326,18 @@ class OVTR(nn.Module):
                 }
             else:
                 frame = nested_tensor_from_tensor_list([frame])
-                frame_res = self._forward_single_image(frame, track_instances, targets, extra_labels, is_first, cls_num)
-            frame_res = self._post_process_single_image(frame_res, track_instances, is_last, is_first=is_first)
-            
+                frame_context = data.get("frame_metadata", [{}] * len(frames))[frame_index]
+                frame_context = dict(frame_context)
+                frame_context["max_motion_dt"] = self.motion_max_dt
+                frame_res = self._forward_single_image(frame, track_instances, targets, extra_labels, is_first, cls_num, frame_context=frame_context)
+            if self.use_checkpoint and frame_index < len(frames) - 3:
+                frame_context = None
+            else:
+                frame_context = data.get("frame_metadata", [{}] * len(frames))[frame_index]
+                frame_context = dict(frame_context)
+                frame_context["max_motion_dt"] = self.motion_max_dt
+            frame_res = self._post_process_single_image(frame_res, track_instances, is_last, is_first=is_first, frame_context=frame_context)
+
             track_instances = frame_res['track_instances']
             outputs['pred_logits'].append(frame_res['pred_logits'])
             outputs['pred_boxes'].append(frame_res['pred_boxes'])
@@ -1175,7 +1371,7 @@ def build(args, cfg):
     continual_cfg = dict(getattr(cfg, 'cmot_continual_cfg', None) or {})
     continual_cfg.setdefault('motion_mode', motion_mode)
     weight_dict = {}
-    
+
     for i in range(0, num_frames_per_batch):
         weight_dict.update({"frame_{}_loss_ce".format(i): args.cls_loss_coef,
                             'frame_{}_loss_bbox'.format(i): args.bbox_loss_coef,
@@ -1233,5 +1429,12 @@ def build(args, cfg):
         miss_tolerance=args.miss_tolerance,
         class_registry=getattr(cfg, 'cmot_class_registry', None),
         continual_cfg=continual_cfg,
+        motion_velocity_limit=float(getattr(cfg, 'cmot_motion_velocity_limit', continual_cfg.get('velocity_limit', 1.25))),
+        motion_warmup_steps=int(getattr(cfg, 'cmot_motion_warmup_steps', continual_cfg.get('warmup_steps', 20))),
+        motion_detach_features=bool(getattr(cfg, 'cmot_motion_detach_features', continual_cfg.get('detach_features', True))),
+        motion_detach_reference=bool(getattr(cfg, 'cmot_motion_detach_reference', continual_cfg.get('detach_reference', True))),
+        motion_max_dt=float(getattr(cfg, 'cmot_motion_max_dt', continual_cfg.get('max_dt', 2.0))),
+        inference_dedup_enabled=bool(getattr(cfg, 'cmot_inference_dedup_enabled', True)),
+        duplicate_iou=float(getattr(cfg, 'cmot_duplicate_iou', continual_cfg.get('duplicate_iou', 0.9))),
     )
     return model, criterion

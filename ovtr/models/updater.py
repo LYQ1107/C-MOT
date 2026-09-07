@@ -172,11 +172,10 @@ class QueryInteractionModule(TrackEmbeddingBase):
         query_feat = self.norm_feat(query_feat)
         track_instances.query_pos[:, dim//2:] = query_feat
 
-        base_ref_pts = inverse_sigmoid(track_instances.pred_boxes[:, :4].detach().clone())
-        if track_instances.has('motion_delta'):
-            track_instances.ref_pts = base_ref_pts + track_instances.motion_delta
-        else:
-            track_instances.ref_pts = base_ref_pts
+        # repair_v2 applies the detached, time-scaled motion velocity once in
+        # OVTR._advance_motion_references before the next transformer call.
+        # Keeping only the base reference here prevents a double addition.
+        track_instances.ref_pts = inverse_sigmoid(track_instances.pred_boxes[:, :4].detach().clone())
         return track_instances
 
     def forward(self, data) -> Instances:
@@ -244,11 +243,7 @@ class Category_Information_Propagator(QueryInteractionModule):
         query_feat = self.norm_feat(query_feat)
         track_instances.query_tgt = query_feat
 
-        base_ref_pts = inverse_sigmoid(track_instances.pred_boxes[:, :4].detach().clone())
-        if track_instances.has('motion_delta'):
-            track_instances.ref_pts = base_ref_pts + track_instances.motion_delta
-        else:
-            track_instances.ref_pts = base_ref_pts
+        track_instances.ref_pts = inverse_sigmoid(track_instances.pred_boxes[:, :4].detach().clone())
         return track_instances
     
     def _select_active_tracks(self, data: dict, id_gt=None) -> Instances:

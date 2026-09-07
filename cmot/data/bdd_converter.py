@@ -68,10 +68,12 @@ def _convert_file(annotation_path: Path, image_root: Path, split: str, domain: s
                 width=int(image["width"]),
                 height=int(image["height"]),
                 annotations=annotations,
-                timestamp_s=float(frame_index) / float(source_video.get("fps", 5) or 5),
-                label_scope="complete",
-                supervised_global_ids=list(GLOBAL_IDS.values()),
-                source_image_id=int(image["id"]),
+                    timestamp_s=float(frame_index) / float(source_video.get("fps", 5) or 5),
+                    label_scope="complete",
+                    supervised_global_ids=list(GLOBAL_IDS.values()),
+                    exhaustive_global_ids=list(GLOBAL_IDS.values()),
+                    annotation_valid=True,
+                    source_image_id=int(image["id"]),
             ))
         if frame_records:
             result.append(VideoRecord(

@@ -1,0 +1,63 @@
+project: C-MOT
+schema_version: cmot.repair_v2
+seed: 20260907
+network:
+  bulk_policy: direct-only
+  require_route_audit: true
+  fallback_to_proxy: false
+resources:
+  protected_gpu_ids: [2, 3, 4]
+  max_gpus: 1
+  max_concurrent_trainers: 1
+  dataloader_workers_per_trainer: 0
+protocol:
+  name: bdd_foundation_assisted_cil_repair_v2
+  class_order: [[car], [pedestrian], [truck]]
+  train_source_cap: 32
+  eval_video_cap: 16
+  eval_manifest_is_immutable: true
+  train_split: train
+  eval_split: val
+training:
+  batch_size_per_gpu: 1
+  clip_frames: 4
+  workers: 0
+  s0_steps: 600
+  incremental_steps: 300
+  lr_backbone: 0.000002
+  lr_heads: 0.00002
+  lr_motion: 0.0002
+  weight_decay: 0.0001
+  max_grad_norm: 0.1
+  input_size: [640, 360]
+motion:
+  enabled: true
+  implementation: one_step_residual_v2
+  mode: one_step_conditioned_v2
+  velocity_limit: 1.25
+  detach_features: true
+  detach_reference: true
+  warmup_steps: 20
+  lambda_motion: 0.1
+  max_dt: 2.0
+replay:
+  budget_mib: 512
+  ratio_schedule: [current, current, current, replay]
+  clip_len: 4
+supervision:
+  pl_score_threshold: 0.19
+  conflict_iou: 0.9
+  pl_duplicate_iou: 0.9
+inference:
+  score_threshold: 0.19
+  filter_threshold: 0.19
+  miss_tolerance: 5
+  duplicate_iou: 0.9
+  inference_dedup_enabled: true
+  maximum_quantity: 160
+evaluation:
+  manifest: immutable_eval_slice
+  classes: [pedestrian, car, truck]
+report:
+  redact_private_paths: true
+  allow_estimated_metrics: false

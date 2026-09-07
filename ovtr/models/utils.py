@@ -282,45 +282,68 @@ def attention_protection(outputs_class, num_queries, layer_id, isol_ratio=None):
         isolate_mask = None
     return isolate_mask
 
-def protect_track_preds(track_instances, num_queries=900, miss_tolerance=5, ious_thresh = 0.3):  
-    '''Lightweight processing due to the limitations of the manually generated dataset.
-    '''
-    pred_boxes = track_instances.pred_boxes.unsqueeze(0)
-    pred_boxes_xy = box_cxcywh_to_xyxy(pred_boxes)
-    ious = bbox_overlaps(pred_boxes_xy, pred_boxes_xy, mode='iou')
+def protect_track_preds(track_instances, num_queries=900, duplicate_iou=0.9):
+    """Mark duplicate detections without mutating tracker age or IDs.
 
-    valid_index = ious > ious_thresh
+    The previous helper both removed query rows and incremented
+    ``disappear_time``.  That made one duplicate suppression event look like a
+    missing observation and also shifted the query/ID correspondence.  The
+    tracker now owns ageing; this function only marks rows which must not be
+    exported or assigned a fresh ID for the current frame.
+    """
+    count = len(track_instances)
+    device = track_instances.scores.device
+    suppressed = torch.zeros(count, dtype=torch.bool, device=device)
+    if count == 0:
+        track_instances.suppressed_this_frame = suppressed
+        return track_instances, {"suppressed": 0, "track_duplicates": 0, "detection_shields": 0}
 
-    # for track queries
-    only_track_index = valid_index[0, num_queries:, num_queries:]
-    track_scores = track_instances.scores[num_queries:]
-    sorted_indices = torch.argsort(track_scores, descending=True)
-    sorted_iou_matrix = only_track_index[sorted_indices][:, sorted_indices]
-    valid_inds = torch.ones_like(track_scores, dtype=torch.bool)
+    boxes = box_cxcywh_to_xyxy(track_instances.pred_boxes.unsqueeze(0))[0]
+    ious = bbox_overlaps(boxes.unsqueeze(0), boxes.unsqueeze(0), mode="iou")[0]
+    scores = track_instances.scores
+    obj_idxes = track_instances.obj_idxes
+    classes = track_instances.cls_idxes if track_instances.has("cls_idxes") else torch.full_like(obj_idxes, -1)
+    track_end = min(int(num_queries), count)
 
-    for i, ind in enumerate(range(len(track_scores))):
-        if sorted_iou_matrix[i, :ind].any():
-            valid_inds[ind] = False 
+    # Keep the strongest already-tracked query for each highly-overlapping
+    # same-class group.  Existing IDs are deliberately not aged here.
+    tracked = [
+        int(index) for index in range(track_end, count)
+        if int(obj_idxes[index]) >= 0 and float(scores[index]) >= 0.19
+    ]
+    tracked.sort(key=lambda index: (-float(scores[index]), index))
+    accepted = []
+    for index in tracked:
+        duplicate = any(
+            int(classes[index]) == int(classes[other])
+            and float(ious[index, other]) >= float(duplicate_iou)
+            for other in accepted
+        )
+        if duplicate:
+            suppressed[index] = True
+        else:
+            accepted.append(index)
 
-    valid_inds = valid_inds[torch.argsort(sorted_indices)]  
-    track_discard = torch.arange(num_queries, len(track_instances), device=track_scores.device)[~valid_inds]
+    # A new detection which overlaps an accepted track must not shield the
+    # track or create a duplicate ID.  Do not compare against suppressed
+    # tracks, and do not suppress low-confidence detections before the normal
+    # tracker threshold has a chance to handle them.
+    for index in range(track_end):
+        if float(scores[index]) < 0.19:
+            continue
+        if any(
+            int(classes[index]) == int(classes[other])
+            and float(ious[index, other]) >= float(duplicate_iou)
+            for other in accepted
+        ):
+            suppressed[index] = True
 
-    track_instances.disappear_time[track_discard] += 1
-    track_instances.obj_idxes[track_instances.disappear_time >= miss_tolerance] = -2
-
-    # for det queries
-    track_index = valid_index[0, :num_queries, num_queries:]
-    track_index = track_index[..., valid_inds]
-    true_positions = torch.nonzero(track_index, as_tuple=False)
-    row_indices = true_positions[:, 0]
-    shielded_ids = torch.unique(row_indices)
-
-    keep_indices = torch.ones(len(track_instances), dtype=torch.bool, device=shielded_ids.device)
-    keep_indices[shielded_ids] = False
-    out_instances = track_instances[keep_indices]
-
-    track_discard -= len(shielded_ids)
-    return out_instances, track_discard
+    track_instances.suppressed_this_frame = suppressed
+    return track_instances, {
+        "suppressed": int(suppressed.sum().item()),
+        "track_duplicates": int(suppressed[track_end:].sum().item()),
+        "detection_shields": int(suppressed[:track_end].sum().item()),
+    }
 
 def protect_det_preds(outputs, num_queries=900):  
     '''Shield detection predictions close to tracking predictions to preserve the perception of 

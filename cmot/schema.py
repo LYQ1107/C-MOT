@@ -68,6 +68,9 @@ class FrameRecord:
     timestamp_s: Optional[float] = None
     label_scope: str = "complete"
     supervised_global_ids: List[int] = field(default_factory=list)
+    exhaustive_global_ids: List[int] = field(default_factory=list)
+    ignore_regions: List[dict] = field(default_factory=list)
+    annotation_valid: bool = True
     source_image_id: Optional[int] = None
 
     def as_dict(self) -> Dict[str, Any]:
@@ -79,7 +82,13 @@ class FrameRecord:
             "height": int(self.height),
             "timestamp_s": self.timestamp_s,
             "label_scope": self.label_scope,
-            "supervised_global_ids": [int(v) for v in self.supervised_global_ids],
+            # ``supervised_global_ids`` is retained for v1 readers, but v2
+            # gives it the same meaning as exhaustiveness.  A PL presence is
+            # deliberately not allowed to widen either list.
+            "supervised_global_ids": [int(v) for v in self.exhaustive_global_ids],
+            "exhaustive_global_ids": [int(v) for v in self.exhaustive_global_ids],
+            "ignore_regions": list(self.ignore_regions),
+            "annotation_valid": bool(self.annotation_valid),
             "source_image_id": self.source_image_id,
             "annotations": [a.as_dict() for a in self.annotations],
         }
@@ -154,6 +163,12 @@ def annotation_from_dict(value: Dict[str, Any]) -> AnnotationRecord:
 
 
 def frame_from_dict(value: Dict[str, Any]) -> FrameRecord:
+    exhaustive = value.get("exhaustive_global_ids")
+    if exhaustive is None:
+        # Canonical v1 manifests are accepted as read-only source material.
+        # Stage views are rebuilt as cmot.v2 before they can be used for a
+        # repair_v2 run.
+        exhaustive = value.get("supervised_global_ids", [])
     return FrameRecord(
         frame_key=value["frame_key"],
         frame_index=int(value["frame_index"]),
@@ -163,7 +178,10 @@ def frame_from_dict(value: Dict[str, Any]) -> FrameRecord:
         annotations=[annotation_from_dict(a) for a in value.get("annotations", [])],
         timestamp_s=value.get("timestamp_s"),
         label_scope=value.get("label_scope", "complete"),
-        supervised_global_ids=[int(v) for v in value.get("supervised_global_ids", [])],
+        supervised_global_ids=[int(v) for v in exhaustive],
+        exhaustive_global_ids=[int(v) for v in exhaustive],
+        ignore_regions=list(value.get("ignore_regions", [])),
+        annotation_valid=bool(value.get("annotation_valid", True)),
         source_image_id=value.get("source_image_id"),
     )
 

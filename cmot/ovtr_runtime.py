@@ -4,7 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 
@@ -33,6 +33,7 @@ def make_model(
     miss_tolerance: int = 5,
     maximum_quantity: int = 160,
     alignment: bool = True,
+    resolved_config: Optional[Mapping[str, Any]] = None,
 ):
     _ensure_ovtr_imports(ovtr_root)
     from main import get_args_parser
@@ -61,13 +62,38 @@ def make_model(
         names.append(registry.class_name_for_global(int(global_id)))
     registry.set_active(names)
     cfg.cmot_class_registry = registry
+    resolved = dict(resolved_config or {})
+    motion_cfg = dict(resolved.get("motion", {}))
+    inference_cfg = dict(resolved.get("inference", {}))
+    if resolved:
+        motion_mode = str(motion_cfg.get("mode", motion_mode))
+        label_mode = "partial" if str(resolved.get("stage", "")).startswith("S1") or str(resolved.get("stage", "")).startswith("S2") else label_mode
+        score_threshold = float(inference_cfg.get("score_threshold", score_threshold))
+        filter_threshold = float(inference_cfg.get("filter_threshold", filter_threshold))
+        miss_tolerance = int(inference_cfg.get("miss_tolerance", miss_tolerance))
+        maximum_quantity = int(inference_cfg.get("maximum_quantity", maximum_quantity))
     cfg.cmot_motion_mode = motion_mode
+    cfg.cmot_motion_loss_coef = float(motion_cfg.get("lambda_motion", 0.1))
+    cfg.cmot_motion_velocity_limit = float(motion_cfg.get("velocity_limit", 1.25))
+    cfg.cmot_motion_warmup_steps = int(motion_cfg.get("warmup_steps", 20))
+    cfg.cmot_motion_detach_features = bool(motion_cfg.get("detach_features", True))
+    cfg.cmot_motion_detach_reference = bool(motion_cfg.get("detach_reference", True))
+    cfg.cmot_motion_max_dt = float(motion_cfg.get("max_dt", 2.0))
+    cfg.cmot_inference_dedup_enabled = bool(inference_cfg.get("inference_dedup_enabled", True))
+    cfg.cmot_duplicate_iou = float(inference_cfg.get("duplicate_iou", 0.9))
     cfg.cmot_label_mode = label_mode
     cfg.cmot_continual_cfg = {
         "motion_mode": motion_mode,
         "maximum_quantity": int(maximum_quantity),
-        "ious_thresh": 0.45,
+        "ious_thresh": float(inference_cfg.get("duplicate_iou", 0.9)),
+        "velocity_limit": cfg.cmot_motion_velocity_limit,
+        "warmup_steps": cfg.cmot_motion_warmup_steps,
+        "detach_features": cfg.cmot_motion_detach_features,
+        "detach_reference": cfg.cmot_motion_detach_reference,
+        "max_dt": cfg.cmot_motion_max_dt,
+        "duplicate_iou": cfg.cmot_duplicate_iou,
     }
+    cfg.cmot_runtime_config = resolved
     model, criterion = build_model(args, cfg)
     model.to(torch.device(device))
     return model, criterion, registry, args, cfg
@@ -79,9 +105,30 @@ def _state_dict(payload):
     return payload.get("model", payload)
 
 
-def load_checkpoint(model, path: str, strict: bool = True, allow_foundation_partial: bool = False) -> dict:
+def load_checkpoint(
+    model,
+    path: str,
+    strict: bool = True,
+    allow_foundation_partial: bool = False,
+    *,
+    init_mode: Optional[str] = None,
+    expected_metadata: Optional[Mapping[str, Any]] = None,
+    allowed_missing_prefixes: Sequence[str] = (),
+) -> dict:
+    """Load a checkpoint with an explicit foundation/transfer/resume audit.
+
+    strict and allow_foundation_partial remain accepted for existing
+    asset-check callers. New repair_v2 callers use init_mode so a missing
+    motion head cannot be silently accepted during stage transfer.
+    """
     path_obj = Path(path)
-    state = _state_dict(torch.load(str(path_obj), map_location="cpu"))
+    payload = torch.load(str(path_obj), map_location="cpu")
+    if init_mode is None:
+        init_mode = "resume" if strict else ("foundation" if allow_foundation_partial else "resume")
+    init_mode = str(init_mode)
+    if init_mode not in ("foundation", "stage_transfer", "resume"):
+        raise ValueError("unknown checkpoint init_mode %s" % init_mode)
+    state = _state_dict(payload)
     if not isinstance(state, dict):
         raise ValueError("checkpoint model state is not a dictionary")
     model_state = model.state_dict()
@@ -90,21 +137,43 @@ def load_checkpoint(model, path: str, strict: bool = True, allow_foundation_part
     mismatch = [key for key in model_state if key in state and tuple(model_state[key].shape) != tuple(state[key].shape)]
     if mismatch:
         raise ValueError("checkpoint shape mismatch: %s" % mismatch[:5])
-    if strict and (missing or unexpected):
-        raise ValueError("strict checkpoint audit failed: missing=%s unexpected=%s" % (missing[:5], unexpected[:5]))
-    if not strict and not allow_foundation_partial and (missing or unexpected):
-        raise ValueError("partial checkpoint requires explicit foundation flag")
+    if init_mode == "resume" and (missing or unexpected):
+        raise ValueError("resume checkpoint audit failed: missing=%s unexpected=%s" % (missing[:5], unexpected[:5]))
+    if init_mode == "stage_transfer":
+        illegal_missing = [
+            key for key in missing
+            if not any(str(key).startswith(str(prefix)) for prefix in allowed_missing_prefixes)
+        ]
+        if illegal_missing or unexpected:
+            raise ValueError(
+                "stage-transfer checkpoint audit failed: missing=%s unexpected=%s"
+                % (illegal_missing[:5], unexpected[:5])
+            )
+    if init_mode == "foundation" and not (allow_foundation_partial or not strict):
+        raise ValueError("foundation checkpoint requires explicit partial-load flag")
+    checkpoint_metadata = payload.get("cmot_metadata", {}) if isinstance(payload, dict) else {}
+    metadata_mismatches = {}
+    for key, expected in (expected_metadata or {}).items():
+        actual = checkpoint_metadata.get(key, payload.get(key) if isinstance(payload, dict) else None)
+        if actual != expected:
+            metadata_mismatches[str(key)] = {"expected": expected, "actual": actual}
+    if metadata_mismatches:
+        raise ValueError("checkpoint metadata mismatch: %s" % metadata_mismatches)
     compatible = {key: value for key, value in state.items() if key in model_state}
     model.load_state_dict(compatible, strict=False)
     return {
         "path_basename": path_obj.name,
         "sha256": sha256_file(str(path_obj)),
         "bytes": path_obj.stat().st_size,
-        "strict": bool(strict),
+        "strict": bool(init_mode == "resume"),
+        "init_mode": init_mode,
         "missing_keys": missing,
         "unexpected_keys": unexpected,
         "shape_mismatch": mismatch,
-        "foundation_partial": bool(allow_foundation_partial),
+        "foundation_partial": bool(init_mode == "foundation"),
+        "allowed_missing_prefixes": list(allowed_missing_prefixes),
+        "metadata_mismatches": metadata_mismatches,
+        "checkpoint_metadata": checkpoint_metadata,
     }
 
 
@@ -132,6 +201,7 @@ def run_video_inference(
     max_frames_per_video: Optional[int] = None,
     input_size: Tuple[int, int] = (640, 360),
     video_ids: Optional[Sequence[str]] = None,
+    metadata: Optional[Mapping[str, Any]] = None,
 ) -> dict:
     # Import after make_model() has installed OVTR's bundled detectron2
     # compatibility package on sys.path.  Importing the dataset at module
@@ -147,7 +217,12 @@ def run_video_inference(
     frame_count = 0
     prediction_count = 0
     selected_videos = []
-    with destination.open("w", encoding="utf-8") as handle:
+    partial = destination.with_name(destination.name + ".partial")
+    if partial.exists():
+        partial.unlink()
+    with partial.open("w", encoding="utf-8") as handle:
+        if metadata:
+            handle.write(json.dumps({"record_type": "metadata", "metadata": dict(metadata)}, sort_keys=True) + "\n")
         for video in videos:
             selected_videos.append(video["video_id"])
             runtime_state = None
@@ -167,12 +242,15 @@ def run_video_inference(
                     },
                 )
                 record["video_id"] = video["video_id"]
+                record["video_uid"] = video["video_id"]
                 record["frame_index"] = int(frame["frame_index"])
                 record["width"] = int(frame["width"])
                 record["height"] = int(frame["height"])
                 handle.write(json.dumps(record, sort_keys=True) + "\n")
                 frame_count += 1
                 prediction_count += len(record.get("predictions", []))
+    os.replace(str(partial), str(destination))
+    runtime_stats = model.consume_runtime_stats() if hasattr(model, "consume_runtime_stats") else {}
     return {
         "view": Path(view_path).name,
         "split": split,
@@ -183,4 +261,6 @@ def run_video_inference(
         "input_size": list(input_size),
         "output_jsonl": destination.name,
         "manifest_hash": payload.get("manifest_hash"),
+        "prediction_sha256": sha256_file(str(destination)),
+        "runtime_stats": runtime_stats,
     }
