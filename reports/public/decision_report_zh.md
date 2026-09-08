@@ -1,43 +1,92 @@
-# C-MOT 执行结果（脱敏）
+# C-MOT V2 修复与真实实验交付（脱敏）
 
-本报告只包含服务器上实际运行的结果。除 `asset_check` 外的结果均为固定 4 个独立夜间视频、每视频 80 帧的 `pilot` 前缀，不是完整 BDD100K benchmark。未运行项写为 `NOT_RUN/null`。
+本报告对应附件 `CMOT_Codex_修复优先与实验执行_V2.md`，审阅基准为
+`cc488678df2ffdf5dd5103ce6380cfa9a2e9065f`。报告只包含实际运行后的
+小型、脱敏摘要；原始视频、标注、权重、完整预测和训练日志留在服务器，
+不进入公开仓库。
 
-## 真实结果
+## 结论
 
-| method | stage | steps | scope | old HOTA | new HOTA | seen HOTA | old IDF1 | new IDF1 | seen IDF1 |
-| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| OVTR-official-asset | S2_truck | 0 | asset_check | 0.1661646919 | 0.0240659639 | 0.1646718622 | 0.1211609436 | 0.0072727273 | 0.1199644817 |
-| OVTR-realvideo-adapted | S0_ref | 20 | pilot | null | 0.1677079345 | 0.1677079345 | null | 0.1462974530 | 0.1462974530 |
-| B0-FT | S1_pedestrian | 100 | pilot | 0.0000000000 | 0.0000000000 | 0.0000000000 | 0.0000000000 | 0.0000000000 | 0.0000000000 |
-| B0-FT | S1_pedestrian | 300 | pilot | 0.0000000000 | 0.0211486373 | 0.0011437385 | 0.0000000000 | 0.0080370943 | 0.0004346537 |
-| O1-DynAgnostic | S1_pedestrian | 100 | pilot | 0.1229134155 | 0.0449352037 | 0.1186962792 | 0.0847898847 | 0.0315789474 | 0.0819121864 |
-| O1-DynAgnostic | S1_pedestrian | 300 | pilot | 0.0695475330 | 0.0569259084 | 0.0688649434 | 0.0377909402 | 0.0224016671 | 0.0369586736 |
-| B1-PLR | S1_pedestrian | 100 | pilot | 0.1149905780 | 0.0530257794 | 0.1116394625 | 0.0725349856 | 0.0306122449 | 0.0702677637 |
-| B1-PLR | S1_pedestrian | 300 | pilot | 0.0248632416 | 0.0682250325 | 0.0272082886 | 0.0082410692 | 0.0428134557 | 0.0101107769 |
-| O2-CMOT | S1_pedestrian | 100 | pilot | 0.0900579083 | 0.0331565239 | 0.0869806271 | 0.0470630023 | 0.0094339623 | 0.0450279878 |
-| O2-CMOT | S1_pedestrian | 300 | pilot | 0.0233749198 | 0.0208029088 | 0.0232358230 | 0.0046584612 | 0.0093312597 | 0.0049111706 |
-| B1-PLR | S2_truck | 100 | pilot | 0.0921011543 | 0.0000000000 | 0.0911335782 | 0.0613424737 | 0.0000000000 | 0.0606980354 |
-| B1-PLR | S2_truck | 300 | pilot | 0.0205260351 | 0.0000000000 | 0.0203103972 | 0.0046992287 | 0.0000000000 | 0.0046498605 |
-| O2-CMOT | S2_truck | 100 | pilot | 0.0120643235 | 0.0095682331 | 0.0120381006 | 0.0017531342 | 0.0000000000 | 0.0017347165 |
-| O2-CMOT | S2_truck | 300 | pilot | 0.0217914791 | 0.0000000000 | 0.0215625469 | 0.0049834392 | 0.0000000000 | 0.0049310852 |
+公共执行路径已修复并实际运行：新 S0 完成 600 个 optimizer steps；同一
+S0 分叉的 B1/O1/O2 S1 各完成 300 steps；随后 B1/O2 S2 各完成 300 steps。
+所有最终评价均绑定具体 checkpoint、prediction SHA、resolved-config SHA 和
+immutable view manifest。
 
-## 来源与安全审计
+S1 的固定评价切片上，O1 的全部已见类 TrackEval detection-average HOTA 为
+`0.162504302`，略高于 B1 的 `0.159927010`；O2 为 `0.158304870`，没有
+超过 O1，照实记录。S2 上 O2 的全部已见类 HOTA 为 `0.185716814`，B1 为
+`0.172217674`；这只是本次固定 pilot 协议的实际结果，不外推为完整
+BDD100K benchmark 或方法有效性结论。
 
-- 本地使用了 clean OVTR 快照、已存在的 BDD100K MOT 图像/COCO box-track 标注和 TAO-Amodal/BDD 稀疏资源；原始目录只读。
-- OVTR 官方本地权重只作 `asset_check`；S0 使用已审计的检测预训练权重，20 步后保存并严格重载。
-- 批量下载真实字节数为 0。净化子环境关闭代理变量、curl 配置和代理回退；官方 BDD archive 的 DNS/直连路径无法确认，因此下载被阻断。
-- public 报告只引用私有运行产物的 basename 和 SHA-256，不包含数据、权重、原始日志、服务器路径、账号或代理信息。
+这里的 `scope=full` 表示该行声明的训练步数和绑定评价已完整执行；评价集仍
+是固定的 `pilot` 切片（16 个独立视频、3,238 帧），不是完整 benchmark。
 
-## 解释边界
+## 指标
 
-- B1 与 O2 使用同一 S0、视频清单、PL/replay 视图、步数、阈值和评价器；O2 只增加类别条件运动分支。
-- 本次 pilot 中训练步数增加通常没有带来指标提升；该事实不被改写为方法有效性结论。O1 class-agnostic 与 B0-FT 已作为独立控制。
-- 当前实现和结果是可验证的工程 pilot，不宣称 TPAMI 最终方法或 SOTA。
+`HOTA` 为 TrackEval 的 `HOTA(0)`，另列 `HOTA_mean`；MOTA 为 CLEAR，
+IDF1 为 Identity。global ID：car=`206`、pedestrian=`792`、truck=`1122`。
+`old/new` 是该阶段的类别角色，`all_seen` 是官方 TrackEval
+`cls_comb_det_av` 聚合。
 
-## 未完成
+| method | stage | scope | steps | role/class | HOTA | HOTA_mean | MOTA | IDF1 |
+| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: |
+| S0-repaired | S0 | full / pilot eval | 600 | seen / car | 0.353572292 | 0.252145991 | -1.358633333 | 0.241925306 |
+| B1 | S1 | full / pilot eval | 300 | old / car | 0.160476638 | 0.126087856 | -6.414633333 | 0.063692245 |
+| B1 | S1 | full / pilot eval | 300 | new / pedestrian | 0.124656573 | 0.097877171 | 0.008847255 | 0.100064419 |
+| B1 | S1 | full / pilot eval | 300 | all_seen | 0.159927010 | 0.125669415 | -5.685222941 | 0.064336697 |
+| O1 | S1 | full / pilot eval | 300 | old / car | 0.162738728 | 0.126961026 | -6.013366667 | 0.066130211 |
+| O1 | S1 | full / pilot eval | 300 | new / pedestrian | 0.149253976 | 0.117587237 | 0.037991153 | 0.126133909 |
+| O1 | S1 | full / pilot eval | 300 | all_seen | 0.162504302 | 0.126816155 | -5.326212215 | 0.067243390 |
+| O2 | S1 | full / pilot eval | 300 | old / car | 0.158807060 | 0.122150655 | -6.088033333 | 0.063022404 |
+| O2 | S1 | full / pilot eval | 300 | new / pedestrian | 0.127539891 | 0.101509955 | 0.028883685 | 0.108240535 |
+| O2 | S1 | full / pilot eval | 300 | all_seen | 0.158304870 | 0.121831066 | -5.393434388 | 0.063829533 |
+| B1 | S2 | full / pilot eval | 300 | old / car | 0.174063199 | 0.134832358 | -6.512966667 | 0.075531538 |
+| B1 | S2 | full / pilot eval | 300 | old / pedestrian | 0.011702196 | 0.009262736 | 0.000260213 | 0.004663212 |
+| B1 | S2 | full / pilot eval | 300 | new / truck | 0.000000000 | 0.000000000 | -0.000871080 | 0.000000000 |
+| B1 | S2 | full / pilot eval | 300 | all_seen | 0.172217674 | 0.133452542 | -5.583978737 | 0.074170855 |
+| O2 | S2 | full / pilot eval | 300 | old / car | 0.187803152 | 0.143135060 | -6.173966667 | 0.084680208 |
+| O2 | S2 | full / pilot eval | 300 | old / pedestrian | 0.011817546 | 0.009166469 | -0.000520427 | 0.004144004 |
+| O2 | S2 | full / pilot eval | 300 | new / truck | 0.000000000 | 0.000000000 | -0.000871080 | 0.000000000 |
+| O2 | S2 | full / pilot eval | 300 | all_seen | 0.185716814 | 0.141602201 | -5.293418308 | 0.083071248 |
 
-- `S0_ref 300-step standalone training`: `NOT_RUN`（20-step S0 smoke was used as the shared legal local starting point.）
-- `full BDD100K benchmark`: `NOT_RUN`（This execution reports a fixed 4-video pilot prefix.）
-- `new bulk dataset download`: `NOT_RUN`（The purified direct route could not resolve the official BDD archive host; no proxy fallback was used.）
+## 已实施接口与执行路径
 
-原始预测与 raw TrackEval 文件的私有 artifact 引用及 SHA-256 位于 `results.json`；它们因公开仓库禁止上传数据/大日志而不入 Git。
+- `cmot/schema.py`、BDD/TAO converter、real-video dataset：分离 source ID、global semantic ID、text row、select column 和 track ID；补齐 `exhaustive_global_ids`、ignore region、annotation validity、timestamp/dt metadata。
+- view builder、clip memory、sampler：主层和辅助层的部分标注掩码、GT/PL 冲突优先级、未来类隔离、真实连续历史片段、合法标签快照回放和跨视频分层采样；回放 clip 不再跨独立窗口拼接。
+- `ovtr/models/ovtr.py`、updater 和 runtime：分类/检测/运动损失只做一次公共归一化；GT 与 PL 分开匹配；运动只读取过去/当前特征，监督使用合法 GT/gt_replay；inverse-sigmoid ref 更新实际使用 residual 和真实 dt。
+- 实际接通的运动实现只有 `one_step_residual_v2`：零初始化末层、软语义条件、detach、warmup、速度上限和 dt 检查。GRU、未接入的三模式模型均未宣称运行。
+- inference/runtime：重复 query 抑制在 global class assignment 后执行，track aging 只发生一次；推理输出使用原子 partial 文件替换，并记录运行统计。
+- config/train/infer/evaluate：repair_v2 配置映射到真实 dataset、optimizer、sampler、motion、inference 和 evaluator；checkpoint、prediction、metric 之间保存并校验绑定；评价保留空帧、ignore/crowd 和官方类别聚合。
+- 本轮还修复了一个实际暴露的调用链错误（匹配结果局部变量缩进导致的 `NameError`），以及由合并回放窗口导致的无效 dt；修复后最终 runs 的 `invalid_dt_count` 均为 0。
+
+## 数据、权重与安全审计
+
+- 数据：使用服务器上已有、只读的 BDD100K MOT canonical；盘点规模为 190 个视频、37,725 帧、423,951 个标注。最终训练视图限制为每阶段 32 个视频，评价使用固定 16 个视频、3,238 帧；TAO-Amodal 仅完成本地稀疏资源盘点，未进入本轮训练/评价。
+- 类别顺序：`car → pedestrian → truck`；当前流只使用新类合法 GT 与旧类 PL；replay 只来自此前保存的合法 memory snapshot。
+- foundation detection pretrain：已有本地审计权重，SHA-256 `0862cac87ad50f58a01ce17d4e44af0468ad8639cfccd18d66d2e9b2570d839e`，用于新 S0 foundation partial init。
+- official OVTR 5-frame 权重：已有本地资源，SHA-256 `7b184a0f149259047ef3f03263cf9178fc9c5e051d08882f065aa52118266d56`，只作来源/asset 检查，未作为合法 S0。
+- 本轮未下载新大型数据或依赖；bulk download `NOT_RUN`，下载字节数 `0`，没有代理回退。净化下载策略仍是 direct-only、fail-closed。
+- Git 中没有数据、标注、权重、原始大日志、账号、Cookie、token、代理信息或服务器私有路径。
+
+## 训练曝光与绑定摘要
+
+- S0：600 steps，2,400 frame exposures，600 current clips，32 个训练视频；来源 `gt=18,660`。
+- B1/O1/O2 S1：各 300 steps，均为 1,200 frame exposures（current=225、replay=75），106 个视频键；来源均为 `gt=2,768`、`gt_replay=3,024`、`pl=15,817`。B1/O1/O2 使用同一个新 S0、同一 S1 current view、同一 replay view、同一 sampler plan 和同一评价阈值。
+- B1 S2：300 steps，来源 `gt=1,170`、`gt_replay=2,528`、`pl=60,608`，`invalid_dt=0`。
+- O2 S2：300 steps，来源 `gt=1,170`、`gt_replay=2,528`、`pl=57,790`，`motion_advance=54,756`，`invalid_dt=0`。
+- O1 S1 的 motion audit：step 1 零初始化末层梯度/更新为 0；step 300 梯度范数 `0.000016230519`、更新范数 `0.020437998697`，说明运动参数确实进入训练更新。
+
+checkpoint、prediction、metric、config、view、memory、sampler 和数据清单的完整哈希见 [`results.json`](results.json)；原始预测与原始 TrackEval 文件仅以 basename + SHA 引用，不上传仓库。
+
+## 未完成或未运行
+
+| 项目 | 状态 |
+| --- | --- |
+| O1 S2 | `NOT_RUN/null` |
+| B0-FT | `NOT_RUN/null` |
+| 完整 BDD100K benchmark | `NOT_RUN/null`；本报告是固定 pilot |
+| TAO 完整训练/评价 | `NOT_RUN/null` |
+| 新大型数据/依赖下载 | `NOT_RUN/null`；无代理回退 |
+| 早期错误回放窗口 run | `discarded`；不计入最终结果 |
+
+最终远端 branch 和 commit 以交付元数据及最终 handoff 为准；推送前字段保持 `PENDING_FINAL_COMMIT`，不会伪造 SHA。

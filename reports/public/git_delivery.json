@@ -1,10 +1,11 @@
 {
-  "schema_version": "cmot.git-delivery.v1",
+  "schema_version": "cmot.git-delivery.v2",
   "repository": "https://github.com/LYQ1107/C-MOT",
-  "delivery_branch": "main",
-  "content_commit": "55f9b154258c63d52627bc74151380578dfb9526",
-  "remote_content_commit_verified": "55f9b154258c63d52627bc74151380578dfb9526",
-  "push_verified": true,
+  "delivery_branch": "fix/repair-v2",
+  "review_base_commit": "cc488678df2ffdf5dd5103ce6380cfa9a2e9065f",
+  "content_commit": "PENDING_FINAL_COMMIT",
+  "remote_content_commit_verified": "NOT_RUN",
+  "push_verified": false,
   "force_push": false,
-  "note": "The delivery metadata is an additional ordinary commit after the code/results content commit; final remote HEAD is reported in the handoff."
+  "note": "Filled only after the final ordinary push and one remote SHA check."
 }

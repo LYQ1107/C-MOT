@@ -1,592 +1,246 @@
 {
-  "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-  "code_commit": "cd7b85016a26cde6f880becba583ab3f56bb8fdb",
-  "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-  "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
+  "schema_version": "cmot.repair-v2.public-results.v1",
+  "spec": "CMOT_Codex_修复优先与实验执行_V2.md",
+  "review_base_commit": "cc488678df2ffdf5dd5103ce6380cfa9a2e9065f",
+  "remote": {
+    "repository": "https://github.com/LYQ1107/C-MOT",
+    "branch": "fix/repair-v2",
+    "final_commit": "PENDING_FINAL_COMMIT",
+    "remote_commit_verified": "NOT_RUN"
+  },
+  "scope": {
+    "evaluation_scope": "pilot",
+    "evaluation_videos": 16,
+    "evaluation_frames": 3238,
+    "train_video_cap": 32,
+    "class_global_ids": {
+      "car": 206,
+      "pedestrian": 792,
+      "truck": 1122
+    },
+    "class_order": ["car", "pedestrian", "truck"],
+    "metric_primary_aggregation": "TrackEval_cls_comb_det_av",
+    "allow_estimated_metrics": false
+  },
+  "source_audit": {
+    "bdd100k_mot": {
+      "status": "used_read_only_existing",
+      "inventory_videos": 190,
+      "inventory_frames": 37725,
+      "inventory_annotations": 423951,
+      "media_index_sha256": "7f42732107adcd65c45f08889318440b4b8c46279acae0ad4f3acbb0fd5d6a44",
+      "immutable_eval_slice_file_sha256": "f37ed78d861b6c04f37ade692db59b99a025c591fd6e4c2a21339cfb38c0254e",
+      "immutable_eval_slice_manifest_hash": "44b6b3b9bcd02d233a903c021fb413ce542e5fbca92c34d3ddb633414ded7f32"
+    },
+    "tao_amodal": {
+      "status": "inventory_only",
+      "training": "NOT_RUN",
+      "evaluation": "NOT_RUN"
+    },
+    "foundation_detection_pretrain": {
+      "status": "used_for_new_S0",
+      "source": "pre-existing_local_audited_weight",
+      "sha256": "0862cac87ad50f58a01ce17d4e44af0468ad8639cfccd18d66d2e9b2570d839e"
+    },
+    "official_ovtr_5_frame_weight": {
+      "status": "asset_check_only",
+      "source": "pre-existing_local_weight",
+      "sha256": "7b184a0f149259047ef3f03263cf9178fc9c5e051d08882f065aa52118266d56",
+      "training_use": "NOT_RUN"
+    }
+  },
   "download_audit": {
     "bulk_bytes_downloaded": 0,
-    "status": "BLOCKED_NO_VERIFIED_DIRECT_ROUTE"
+    "new_large_download": "NOT_RUN",
+    "route_policy": "direct_only_fail_closed",
+    "proxy_fallback": false,
+    "status": "NOT_RUN"
   },
-  "protocol": "bdd_foundation_assisted_label_cil_pilot",
-  "rows": [
+  "repository_artifacts": {
+    "config_file": "configs/cmot_repair_v2.yaml",
+    "config_sha256": "3edce80f1b4d5f772cd2ea20668977bfd12491a7ad4dd2cf5a8777aeb20bc5fa",
+    "protocol_hash": "245546503e945871f1be21a2b07c33c9b87bb017038a9ee2ad983fffb4544ea5",
+    "s0_train_view_sha256": "e606c13b74134065ff6c0a6fca4b6ff8fde5a2b61981eadd5760836db7b8944c",
+    "s1_train_view_sha256": "d3fef631c7b5481c8d3adcccbdbed6a46fe634bea67c571b79c1726496301db4",
+    "s2_b1_train_view_sha256": "fdbc12554673f6a45cfaa505db36c5d334ee9f9872be1cdf71eab0f22bd7cf9a",
+    "s2_o2_train_view_sha256": "cd4ce1c43124c7af240fae6b56a7b005be9793347dec47338e2ed86f65552fae",
+    "s0_eval_view_sha256": "34ee4cfc56a2c3a173e820bfe9064fbe6b985bbe0fc2b8b6ffd3d57abbf6d545",
+    "s1_eval_view_sha256": "6555919b5ea87f652f5841654137c45ad44ad63e12f743f01e030bae3b83a063",
+    "s2_eval_view_sha256": "5d8b507db7553ef1a5e1ed3025aab7f7512633e8211a89859850be17b3f5c5e7",
+    "s1_replay_view_sha256": "881f479f12d4a730b75ba59852b46b2ebb258c07aba3556fec2ee6389f02b586",
+    "s2_replay_view_sha256": "0bf08d94615f1aef26a49b986354153f5eea34ad937e3c70c7773293be4106b2",
+    "s0_memory_version": "25888e73491b171be62fbd69342f1c280371c6e4c7facae1417cd78e2aa8fa4c",
+    "s1_common_memory_version": "ad07f270089a933f8c4cf4858d451fd6adc23e34f38aaec6837d7e82913d8f8a"
+  },
+  "runs": [
     {
-      "checkpoint_bytes": null,
-      "checkpoint_sha256": "7b184a0f149259047ef3f03263cf9178fc9c5e051d08882f065aa52118266d56",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "7c490b90bd53513a28f2e7dde056dd4b29f306ccef5770283bfbbf870fa7b1ca",
-      "frame_count": 320,
-      "label_protocol": "asset_check_only",
-      "method": "OVTR-official-asset",
+      "method": "S0-repaired",
+      "stage": "S0",
+      "scope": "full",
+      "steps": 600,
+      "motion_implementation": "none",
       "motion_mode": "none",
-      "new": {
-        "hota_mean": 0.024065963888444713,
-        "idf1": 0.007272727272727273,
-        "mota": -7.53125
+      "checkpoint": "checkpoint_600.pt",
+      "checkpoint_sha256": "e29df7456a30990de06d3b91e3b9ffa1dcd99d53a50a9432e6638798f9ba1ebf",
+      "train_resolved_config_sha256": "2cec159e8d36c0fb38b10a022d60edb9262065fa8169394cbdb16912a87bb518",
+      "prediction_resolved_config_sha256": "5520a2c78bcef2d9f5b1064ea5977d2c8ec9749a0eec5d6bbba32ff4465c1d4a",
+      "train_view_sha256": "e606c13b74134065ff6c0a6fca4b6ff8fde5a2b61981eadd5760836db7b8944c",
+      "sampler_plan_hash": "14872b5364b22c11306d27f13ea41167fa48a53d4e618e59616d639baba7f2b4",
+      "prediction_artifact": "S0_eval.jsonl",
+      "prediction_sha256": "eeae78c774ae1358827ec39fc35895002f05312312114e40be3900e6bedb1e65",
+      "metric_artifact": "S0_eval_trackeval.json",
+      "metric_sha256": "baa321a4831fe0e3071b40928afd37e061524e3493dfa74f7ff09fa99ea4f55b",
+      "exposure": {
+        "frames_seen": 2400,
+        "current_frames": 2400,
+        "replay_frames": 0,
+        "video_ids_unique": 32,
+        "annotations_by_source": {"gt": 18660},
+        "invalid_dt_count": 0
       },
-      "old": {
-        "hota_mean": 0.16616469189150535,
-        "idf1": 0.12116094362736468,
-        "mota": -5.9455872594558725
-      },
-      "parent_checkpoint_sha256": "7b184a0f149259047ef3f03263cf9178fc9c5e051d08882f065aa52118266d56",
-      "raw_metric_artifact": "private-run-artifact:asset_check/ovtr_5_frame_bdd_night_trackeval.json",
-      "raw_metric_sha256": "bad56b5ed8f5494fd42b58663a25005116bafc4f5621a38fd9b210926c8c8219",
-      "raw_prediction_artifact": "private-run-artifact:asset_check/ovtr_5_frame_bdd_night.jsonl",
-      "raw_prediction_sha256": "e5d3141bb76495963206ec216c6486af7fbbab35344933ca55da2c283b89a0a7",
-      "scope": "asset_check",
-      "seen": {
-        "hota_mean": 0.1646718621816899,
-        "idf1": 0.11996448173526081,
-        "mota": -5.962245567957978
-      },
-      "stage": "S2_truck",
-      "status": "OK",
-      "steps": 0,
-      "train_frames_exposed": null,
-      "train_source_count": null,
-      "train_view_sha256": null,
-      "video_count": 4
+      "metrics": {
+        "car": {"role": "seen", "hota": 0.35357229165839205, "hota_mean": 0.25214599053584824, "deta": 0.32007791775063754, "assa": 0.39057166550914935, "mota": -1.3586333333333334, "idf1": 0.24192530604716184, "gt_dets": 30000, "pred_dets": 73007},
+        "all_seen": {"aggregation": "TrackEval_cls_comb_det_av", "hota": 0.35357229165839205, "hota_mean": 0.25214599053584824, "deta": 0.32007791775063754, "assa": 0.39057166550914935, "mota": -1.3586333333333334, "idf1": 0.24192530604716184, "gt_dets": 30000, "pred_dets": 73007}
+      }
     },
     {
-      "checkpoint_bytes": 712581311,
-      "checkpoint_sha256": "109c02a7e3b989450b114eca8051e10deba6382da12fed461609ce2c15d77c6b",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "1ad4ed0e9179c4deeebead80e5bfc03e0ce6f955dbd11a3e9218aa0479ed6b7c",
-      "frame_count": 320,
-      "label_protocol": "complete",
-      "method": "OVTR-realvideo-adapted",
-      "motion_mode": "none",
-      "new": {
-        "hota_mean": 0.1677079345108725,
-        "idf1": 0.1462974529807759,
-        "mota": -3.1827428972290424
-      },
-      "old": {
-        "hota_mean": null,
-        "idf1": null,
-        "mota": null
-      },
-      "parent_checkpoint_sha256": "0862cac87ad50f58a01ce17d4e44af0468ad8639cfccd18d66d2e9b2570d839e",
-      "raw_metric_artifact": "private-run-artifact:S0_ref_20/eval_trackeval.json",
-      "raw_metric_sha256": "0c9fda063c87ba66a2dc4ce0c79b11e9e6d16440cba74365068f451ba460d706",
-      "raw_prediction_artifact": "private-run-artifact:S0_ref_20/eval_independent.jsonl",
-      "raw_prediction_sha256": "b4cb3ee8e97abd88f2034433cef52bc64a8d7fa1eb49910997c6229af33e6a30",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.1677079345108725,
-        "idf1": 0.1462974529807759,
-        "mota": -3.1827428972290424
-      },
-      "stage": "S0_ref",
-      "status": "OK",
-      "steps": 20,
-      "train_frames_exposed": 40,
-      "train_source_count": 154,
-      "train_view_sha256": "9402611dbdea960c457341a9e071462814df4feb7e8a8917c620b7116f71c5c0",
-      "video_count": 4
-    },
-    {
-      "checkpoint_bytes": 674634563,
-      "checkpoint_sha256": "1461176f5cbd89af84c6babd1462a109192576adf33834be8b33209450e40c90",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "13d1512726c86275167097a57b9b8f7c94e2c8113a85388d90793862e60b675f",
-      "frame_count": 320,
-      "label_protocol": "naive_complete",
-      "method": "B0-FT",
-      "motion_mode": "none",
-      "new": {
-        "hota_mean": 0.0,
-        "idf1": 0.0,
-        "mota": 0.0
-      },
-      "old": {
-        "hota_mean": 0.0,
-        "idf1": 0.0,
-        "mota": 0.0
-      },
-      "parent_checkpoint_sha256": "109c02a7e3b989450b114eca8051e10deba6382da12fed461609ce2c15d77c6b",
-      "raw_metric_artifact": "private-run-artifact:B0_FT_S1_100/eval_trackeval_100.json",
-      "raw_metric_sha256": "8cfa5eb43d126b9d551c099256309a344e9f00665ab3e5da57f1c2475be2c395",
-      "raw_prediction_artifact": "private-run-artifact:B0_FT_S1_100/eval_independent.jsonl",
-      "raw_prediction_sha256": "a4156db3e0a931f4feb7fe8dd4c913f7844df6f340964ce8c716d67cd20edece",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.0,
-        "idf1": 0.0,
-        "mota": 0.0
-      },
-      "stage": "S1_pedestrian",
-      "status": "OK",
-      "steps": 100,
-      "train_frames_exposed": 200,
-      "train_source_count": 154,
-      "train_view_sha256": "7f79bf182f2809e7ba546a965ca1bb14ab7c8973a003b8d9fb0c716d7b05a3c3",
-      "video_count": 4
-    },
-    {
-      "checkpoint_bytes": 712578559,
-      "checkpoint_sha256": "d529af971315987367fa1bb68fc6909ed3c80adefbd2ea7334e9008e1618ff4f",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "13d1512726c86275167097a57b9b8f7c94e2c8113a85388d90793862e60b675f",
-      "frame_count": 320,
-      "label_protocol": "naive_complete",
-      "method": "B0-FT",
-      "motion_mode": "none",
-      "new": {
-        "hota_mean": 0.021148637318945278,
-        "idf1": 0.0080370942812983,
-        "mota": -18.650306748466257
-      },
-      "old": {
-        "hota_mean": 0.0,
-        "idf1": 0.0,
-        "mota": 0.0
-      },
-      "parent_checkpoint_sha256": "109c02a7e3b989450b114eca8051e10deba6382da12fed461609ce2c15d77c6b",
-      "raw_metric_artifact": "private-run-artifact:B0_FT_S1_100/eval_trackeval_300.json",
-      "raw_metric_sha256": "33b116893493536e3672892f30f439daf34fc582abfcc610d2589e59800ca621",
-      "raw_prediction_artifact": "private-run-artifact:B0_FT_S1_100/eval_independent_300.jsonl",
-      "raw_prediction_sha256": "8f2e450026c58fa7c9727bce24d1b6312cd46a59c63825c726752f4f132c713e",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.0011437385145945853,
-        "idf1": 0.0004346537385041881,
-        "mota": -1.008626410086264
-      },
-      "stage": "S1_pedestrian",
-      "status": "OK",
+      "method": "B1",
+      "stage": "S1",
+      "scope": "full",
       "steps": 300,
-      "train_frames_exposed": 600,
-      "train_source_count": 154,
-      "train_view_sha256": "7f79bf182f2809e7ba546a965ca1bb14ab7c8973a003b8d9fb0c716d7b05a3c3",
-      "video_count": 4
-    },
-    {
-      "checkpoint_bytes": 714989421,
-      "checkpoint_sha256": "d168a6f912f031a8bba052f6c5aa68540a0d9ac965cbb8bdbe145c9a82602e29",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "13d1512726c86275167097a57b9b8f7c94e2c8113a85388d90793862e60b675f",
-      "frame_count": 320,
-      "label_protocol": "partial_label_pl_old_replay",
-      "method": "O1-DynAgnostic",
-      "motion_mode": "class_agnostic",
-      "new": {
-        "hota_mean": 0.044935203663469536,
-        "idf1": 0.031578947368421054,
-        "mota": -0.10429447852760736
-      },
-      "old": {
-        "hota_mean": 0.12291341545010608,
-        "idf1": 0.08478988471550762,
-        "mota": -4.970185899684322
-      },
-      "parent_checkpoint_sha256": "109c02a7e3b989450b114eca8051e10deba6382da12fed461609ce2c15d77c6b",
-      "raw_metric_artifact": "private-run-artifact:O1_DynAgnostic_S1_100/eval_trackeval_100.json",
-      "raw_metric_sha256": "1cbe2a12c92a21a91721c223613d9926e71b8ff43fe8c0b9d413202e1bd7d197",
-      "raw_prediction_artifact": "private-run-artifact:O1_DynAgnostic_S1_100/eval_independent.jsonl",
-      "raw_prediction_sha256": "7f08434dde070714135ee6218bfbe76072b7622d6df534cac78177dcdab3ad8f",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.11869627924532115,
-        "idf1": 0.08191218637855502,
-        "mota": -4.707033842070339
-      },
-      "stage": "S1_pedestrian",
-      "status": "OK",
-      "steps": 100,
-      "train_frames_exposed": 200,
-      "train_source_count": 154,
-      "train_view_sha256": "9dcab637be0a2d0ef266e633a1a794f90532cae7b9524f032abe3b44359988c2",
-      "video_count": 4
-    },
-    {
-      "checkpoint_bytes": 714989613,
-      "checkpoint_sha256": "c50f232beb65a9ca4955deca4bf252f9337e18f84566455fcb1e1114a8ca83a3",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "13d1512726c86275167097a57b9b8f7c94e2c8113a85388d90793862e60b675f",
-      "frame_count": 320,
-      "label_protocol": "partial_label_pl_old_replay",
-      "method": "O1-DynAgnostic",
-      "motion_mode": "class_agnostic",
-      "new": {
-        "hota_mean": 0.056925908420756816,
-        "idf1": 0.0224016671008075,
-        "mota": -21.950920245398773
-      },
-      "old": {
-        "hota_mean": 0.069547532965588,
-        "idf1": 0.037790940185200635,
-        "mota": -7.05682216766047
-      },
-      "parent_checkpoint_sha256": "109c02a7e3b989450b114eca8051e10deba6382da12fed461609ce2c15d77c6b",
-      "raw_metric_artifact": "private-run-artifact:O1_DynAgnostic_S1_100/eval_trackeval_300.json",
-      "raw_metric_sha256": "75a1df0ddae41bc57887cb9d7544de13e34c75b38f4daa498718954eb09b8c3d",
-      "raw_prediction_artifact": "private-run-artifact:O1_DynAgnostic_S1_100/eval_independent_300.jsonl",
-      "raw_prediction_sha256": "21881c9cf4c6fde513649aec233c3b49d2c2b7c801c81ce5a2d82df5b4881102",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.06886494344972618,
-        "idf1": 0.03695867359171819,
-        "mota": -7.862309223623092
-      },
-      "stage": "S1_pedestrian",
-      "status": "OK",
-      "steps": 300,
-      "train_frames_exposed": 600,
-      "train_source_count": 154,
-      "train_view_sha256": "9dcab637be0a2d0ef266e633a1a794f90532cae7b9524f032abe3b44359988c2",
-      "video_count": 4
-    },
-    {
-      "checkpoint_bytes": 712578111,
-      "checkpoint_sha256": "cc9ea96d11face9f39b501332ba3cec4c5021526e8dd70fa8e27f33afc262d7e",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "13d1512726c86275167097a57b9b8f7c94e2c8113a85388d90793862e60b675f",
-      "frame_count": 320,
-      "label_protocol": "partial_label_pl_old_replay",
-      "method": "B1-PLR",
+      "motion_implementation": "none",
       "motion_mode": "none",
-      "new": {
-        "hota_mean": 0.05302577944930941,
-        "idf1": 0.030612244897959183,
-        "mota": -0.12883435582822086
-      },
-      "old": {
-        "hota_mean": 0.11499057798376712,
-        "idf1": 0.07253498557846384,
-        "mota": -4.985268326902841
-      },
-      "parent_checkpoint_sha256": "109c02a7e3b989450b114eca8051e10deba6382da12fed461609ce2c15d77c6b",
-      "raw_metric_artifact": "private-run-artifact:B1_S1_100/eval_trackeval_100.json",
-      "raw_metric_sha256": "7ae104d2a4dfaf8cbe3189b8729d93420b72fd75eec7d67df0d492493f421791",
-      "raw_prediction_artifact": "private-run-artifact:B1_S1_100/eval_independent.jsonl",
-      "raw_prediction_sha256": "6c4315f3a0b2164087bf72ec851d9d59d718cc54d692f44bd2430b0f9a2d6ce3",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.1116394624691299,
-        "idf1": 0.07026776370357259,
-        "mota": -4.7226277372262775
-      },
-      "stage": "S1_pedestrian",
-      "status": "OK",
-      "steps": 100,
-      "train_frames_exposed": 200,
-      "train_source_count": 154,
-      "train_view_sha256": "9dcab637be0a2d0ef266e633a1a794f90532cae7b9524f032abe3b44359988c2",
-      "video_count": 4
+      "checkpoint_sha256": "0719311e37d11716a55cb29d72cd375f07e8841017c0fadb315ae5458d841cfe",
+      "resolved_config_sha256": "f3ccc69eaba3c004bd1468c0f8185748f20d4a46fe77d38e7a4784998298c797",
+      "train_view_sha256": "d3fef631c7b5481c8d3adcccbdbed6a46fe634bea67c571b79c1726496301db4",
+      "replay_view_sha256": "881f479f12d4a730b75ba59852b46b2ebb258c07aba3556fec2ee6389f02b586",
+      "memory_version": "25888e73491b171be62fbd69342f1c280371c6e4c7facae1417cd78e2aa8fa4c",
+      "sampler_plan_hash": "3079bdb53af74054889e44b4517a462899297d07a030990c95be510247dc0c52",
+      "prediction_artifact": "B1_S1_eval_v2.jsonl",
+      "prediction_sha256": "c546a417ae68a63f7d1d4148fe93e211939f32b4a3516a92a8647b3be0e541f6",
+      "metric_artifact": "B1_S1_trackeval_v2.json",
+      "metric_sha256": "672741cc72f8417985cb5fc1eafd3a938a81671d6e6b93938009e8fce862620d",
+      "exposure": {"frames_seen": 1200, "current_frames": 900, "replay_frames": 300, "video_ids_unique": 106, "annotations_by_source": {"gt": 2768, "gt_replay": 3024, "pl": 15817}, "invalid_dt_count": 0},
+      "metrics": {
+        "car": {"role": "old", "hota": 0.1604766382804392, "hota_mean": 0.1260878558191503, "deta": 0.12931290898274836, "assa": 0.1991506620365845, "mota": -6.414633333333334, "idf1": 0.06369224452802126, "gt_dets": 30000, "pred_dets": 228179},
+        "pedestrian": {"role": "new", "hota": 0.12465657318630527, "hota_mean": 0.09787717058519033, "deta": 0.16105709299426577, "assa": 0.09648293626599816, "mota": 0.008847254748894093, "idf1": 0.10006441915396178, "gt_dets": 3843, "pred_dets": 814},
+        "all_seen": {"aggregation": "TrackEval_cls_comb_det_av", "hota": 0.15992700975270113, "hota_mean": 0.1256694153575028, "deta": 0.12986024838045454, "assa": 0.19695517887435474, "mota": -5.685222941228615, "idf1": 0.06433669664733903, "gt_dets": 33843, "pred_dets": 228993},
+        "all_seen_class_average": {"aggregation": "TrackEval_cls_comb_cls_av", "hota": 0.14256660573337224, "hota_mean": 0.11198251320217031, "deta": 0.14518500098850706, "assa": 0.1478167991512913, "mota": -3.2028930392922197, "idf1": 0.08187833184099153, "gt_dets": 33843, "pred_dets": 228993}
+      }
     },
     {
-      "checkpoint_bytes": 712578495,
-      "checkpoint_sha256": "148c72afeabe47a702ef9418b03b1c26f7f00b7af943fd0fcb5e4fa141b160d4",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "13d1512726c86275167097a57b9b8f7c94e2c8113a85388d90793862e60b675f",
-      "frame_count": 320,
-      "label_protocol": "partial_label_pl_old_replay",
-      "method": "B1-PLR",
+      "method": "O1",
+      "stage": "S1",
+      "scope": "full",
+      "steps": 300,
+      "motion_implementation": "one_step_residual_v2",
+      "motion_mode": "one_step_agnostic_v2",
+      "checkpoint_sha256": "55b58ca1f640a509bc7a332f93823fb8b5b65b8ad9496a4d93ea2ac34ffb139d",
+      "resolved_config_sha256": "8f5162ec43ea5b4f6bd70a85763a40f6009080544093a5b5fb08b692ba797883",
+      "train_view_sha256": "d3fef631c7b5481c8d3adcccbdbed6a46fe634bea67c571b79c1726496301db4",
+      "replay_view_sha256": "881f479f12d4a730b75ba59852b46b2ebb258c07aba3556fec2ee6389f02b586",
+      "memory_version": "25888e73491b171be62fbd69342f1c280371c6e4c7facae1417cd78e2aa8fa4c",
+      "sampler_plan_hash": "3079bdb53af74054889e44b4517a462899297d07a030990c95be510247dc0c52",
+      "prediction_artifact": "O1_S1_eval_v2.jsonl",
+      "prediction_sha256": "19762b6930e11b9b9e5930ccf024baf539050a6ae96fde8cbe6f98dcc46ddb4e",
+      "metric_artifact": "O1_S1_trackeval_v2.json",
+      "metric_sha256": "fc12ac1b2bd7b8f79c3a612ee6ed606d201bdacb4284a1d22eec053323b57c06",
+      "exposure": {"frames_seen": 1200, "current_frames": 900, "replay_frames": 300, "video_ids_unique": 106, "annotations_by_source": {"gt": 2768, "gt_replay": 3024, "pl": 15817}, "invalid_dt_count": 0, "motion_advance_count": 15846},
+      "metrics": {
+        "car": {"role": "old", "hota": 0.1627387283803997, "hota_mean": 0.1269610257605833, "deta": 0.1367806969912145, "assa": 0.19362303524868416, "mota": -6.013366666666666, "idf1": 0.0661302109487591, "gt_dets": 30000, "pred_dets": 214941},
+        "pedestrian": {"role": "new", "hota": 0.14925397569375867, "hota_mean": 0.11758723673648819, "deta": 0.1641941161679658, "assa": 0.13567324932401745, "mota": 0.037991152745251104, "idf1": 0.126133909287257, "gt_dets": 3843, "pred_dets": 787},
+        "all_seen": {"aggregation": "TrackEval_cls_comb_det_av", "hota": 0.16250430153270373, "hota_mean": 0.12681615498283397, "deta": 0.13727750790627308, "assa": 0.19236689549071545, "mota": -5.3262122152291465, "idf1": 0.06724338965665082, "gt_dets": 33843, "pred_dets": 215728},
+        "all_seen_class_average": {"aggregation": "TrackEval_cls_comb_cls_av", "hota": 0.15599635203707918, "hota_mean": 0.12227413124853573, "deta": 0.15048740657959014, "assa": 0.1646481422863508, "mota": -2.9876877569607077, "idf1": 0.09613206011800805, "gt_dets": 33843, "pred_dets": 215728}
+      }
+    },
+    {
+      "method": "O2",
+      "stage": "S1",
+      "scope": "full",
+      "steps": 300,
+      "motion_implementation": "one_step_residual_v2",
+      "motion_mode": "one_step_conditioned_v2",
+      "checkpoint_sha256": "e38a56b51f27eb283a71e92547663dc9250025671b9a396f2ca79499941981dc",
+      "resolved_config_sha256": "af5e6d465cd0d4567899e8229e15f84b8b0b77ac4e9823d3a14f20b644112680",
+      "train_view_sha256": "d3fef631c7b5481c8d3adcccbdbed6a46fe634bea67c571b79c1726496301db4",
+      "replay_view_sha256": "881f479f12d4a730b75ba59852b46b2ebb258c07aba3556fec2ee6389f02b586",
+      "memory_version": "25888e73491b171be62fbd69342f1c280371c6e4c7facae1417cd78e2aa8fa4c",
+      "sampler_plan_hash": "3079bdb53af74054889e44b4517a462899297d07a030990c95be510247dc0c52",
+      "prediction_artifact": "O2_S1_eval_v2.jsonl",
+      "prediction_sha256": "64080cacf352c469a98289b9716b68ac58926fd2dc67a7566d0e0630757d7e37",
+      "metric_artifact": "O2_S1_trackeval_v2.json",
+      "metric_sha256": "089e4444414ec762391233b5d1c7f77c18d255dda53f0f00e04ff3e588ee8ca5",
+      "exposure": {"frames_seen": 1200, "current_frames": 900, "replay_frames": 300, "video_ids_unique": 106, "annotations_by_source": {"gt": 2768, "gt_replay": 3024, "pl": 15817}, "invalid_dt_count": 0, "motion_advance_count": 15895},
+      "metrics": {
+        "car": {"role": "old", "hota": 0.1588070595555206, "hota_mean": 0.12215065464289437, "deta": 0.1352221920993259, "assa": 0.18650549716089385, "mota": -6.088033333333334, "idf1": 0.06302240391815588, "gt_dets": 30000, "pred_dets": 217055},
+        "pedestrian": {"role": "new", "hota": 0.1275398908258606, "hota_mean": 0.10150995496981197, "deta": 0.13930474498858159, "assa": 0.11676862660497139, "mota": 0.02888368462138954, "idf1": 0.10824053452115813, "gt_dets": 3843, "pred_dets": 647},
+        "all_seen": {"aggregation": "TrackEval_cls_comb_det_av", "hota": 0.15830486969827412, "hota_mean": 0.12183106553393712, "deta": 0.1352948079145003, "assa": 0.185228333270738, "mota": -5.393434388204356, "idf1": 0.0638295334830746, "gt_dets": 33843, "pred_dets": 217702},
+        "all_seen_class_average": {"aggregation": "TrackEval_cls_comb_cls_av", "hota": 0.1431734751906906, "hota_mean": 0.11183030480635318, "deta": 0.13726346854395374, "assa": 0.15163706188293263, "mota": -3.029574824355972, "idf1": 0.085631469219657, "gt_dets": 33843, "pred_dets": 217702}
+      }
+    },
+    {
+      "method": "B1",
+      "stage": "S2",
+      "scope": "full",
+      "steps": 300,
+      "motion_implementation": "none",
       "motion_mode": "none",
-      "new": {
-        "hota_mean": 0.06822503246003923,
-        "idf1": 0.04281345565749235,
-        "mota": -12.386503067484663
-      },
-      "old": {
-        "hota_mean": 0.024863241563504182,
-        "idf1": 0.008241069189150452,
-        "mota": -8.676604700105226
-      },
-      "parent_checkpoint_sha256": "109c02a7e3b989450b114eca8051e10deba6382da12fed461609ce2c15d77c6b",
-      "raw_metric_artifact": "private-run-artifact:B1_S1_100/eval_trackeval_300.json",
-      "raw_metric_sha256": "51590fdb298d51ec3c1fe54011843d351d09b495815a0e85e8b4315deaf854b1",
-      "raw_prediction_artifact": "private-run-artifact:B1_S1_100/eval_independent_300.jsonl",
-      "raw_prediction_sha256": "0385712966be77df489a1d7ebe3d14013ce49c9d7e40275da4f3cb470ebfadcd",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.02720828864914958,
-        "idf1": 0.010110776884684536,
-        "mota": -8.877239548772396
-      },
-      "stage": "S1_pedestrian",
-      "status": "OK",
+      "checkpoint_sha256": "68c96314ac5926a54b80278f2968165103046684ba2babea645b604018452406",
+      "resolved_config_sha256": "de6e600291ff02927dfa2c4fe24a3cf9b3ca5806ca6dfa04af6569b9f738c0e2",
+      "train_view_sha256": "fdbc12554673f6a45cfaa505db36c5d334ee9f9872be1cdf71eab0f22bd7cf9a",
+      "replay_view_sha256": "0bf08d94615f1aef26a49b986354153f5eea34ad937e3c70c7773293be4106b2",
+      "memory_version": "ad07f270089a933f8c4cf4858d451fd6adc23e34f38aaec6837d7e82913d8f8a",
+      "sampler_plan_hash": "200a9d1a1452b464b360b24cdc77fad304a68c899b772f6a70ce366438e13094",
+      "prediction_artifact": "B1_S2_eval_v2.jsonl",
+      "prediction_sha256": "ca4fce88c9effb9142de49fd2aa72350f456fcbec60d313d33c12b97a30f1dae",
+      "metric_artifact": "B1_S2_trackeval_v2.json",
+      "metric_sha256": "2d86c09a517312a698a8466bc8164ea82c676ed68f63197c84607613fd8cc8b8",
+      "exposure": {"frames_seen": 1200, "current_frames": 900, "replay_frames": 300, "video_ids_unique": 107, "annotations_by_source": {"gt": 1170, "gt_replay": 2528, "pl": 60608}, "invalid_dt_count": 0},
+      "metrics": {
+        "car": {"role": "old", "hota": 0.17406319910896637, "hota_mean": 0.13483235850938838, "deta": 0.12409466533985203, "assa": 0.2441522945492622, "mota": -6.512966666666666, "idf1": 0.07553153818915216, "gt_dets": 30000, "pred_dets": 229812},
+        "pedestrian": {"role": "old", "hota": 0.011702195554934625, "hota_mean": 0.009262736069877, "deta": 0.0028578851649779164, "assa": 0.047917034065639186, "mota": 0.00026021337496747333, "idf1": 0.00466321243523316, "gt_dets": 3843, "pred_dets": 17},
+        "truck": {"role": "new", "hota": 0.0, "hota_mean": 0.0, "deta": 0.0, "assa": 0.0, "mota": -0.0008710801393728223, "idf1": 0.0, "gt_dets": 1148, "pred_dets": 1},
+        "all_seen": {"aggregation": "TrackEval_cls_comb_det_av", "hota": 0.17221767435397664, "hota_mean": 0.1334525422122241, "deta": 0.12151460224962732, "assa": 0.24407706407962432, "mota": -5.583978737389614, "idf1": 0.07417085503037901, "gt_dets": 34991, "pred_dets": 229830},
+        "all_seen_class_average": {"aggregation": "TrackEval_cls_comb_cls_av", "hota": 0.06192179822130033, "hota_mean": 0.048031698193088466, "deta": 0.042317516834943315, "assa": 0.09735644287163381, "mota": -2.1711925111436905, "idf1": 0.02673158354146177, "gt_dets": 34991, "pred_dets": 229830}
+      }
+    },
+    {
+      "method": "O2",
+      "stage": "S2",
+      "scope": "full",
       "steps": 300,
-      "train_frames_exposed": 600,
-      "train_source_count": 154,
-      "train_view_sha256": "9dcab637be0a2d0ef266e633a1a794f90532cae7b9524f032abe3b44359988c2",
-      "video_count": 4
-    },
-    {
-      "checkpoint_bytes": 714989421,
-      "checkpoint_sha256": "135dea1f061c763b8405931af01852c31babf6a2d15a57d3163dd4f4c22225fe",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "13d1512726c86275167097a57b9b8f7c94e2c8113a85388d90793862e60b675f",
-      "frame_count": 320,
-      "label_protocol": "partial_label_pl_old_replay",
-      "method": "O2-CMOT",
-      "motion_mode": "category_conditioned",
-      "new": {
-        "hota_mean": 0.033156523912197464,
-        "idf1": 0.009433962264150943,
-        "mota": -0.26380368098159507
-      },
-      "old": {
-        "hota_mean": 0.09005790834733915,
-        "idf1": 0.047063002264352,
-        "mota": -6.448263767099263
-      },
-      "parent_checkpoint_sha256": "109c02a7e3b989450b114eca8051e10deba6382da12fed461609ce2c15d77c6b",
-      "raw_metric_artifact": "private-run-artifact:O2_S1_100/eval_trackeval_100.json",
-      "raw_metric_sha256": "f97f946286cbbaca53b79438eb30d1e8c8f0d9f600ccf2cf17593a780ca680e7",
-      "raw_prediction_artifact": "private-run-artifact:O2_S1_100/eval_independent.jsonl",
-      "raw_prediction_sha256": "1bac5d15e7d7b63aa5172b2b8a373a0543bb3192632c5ed05b4acfcef5e65ef5",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.08698062710549173,
-        "idf1": 0.045027987825057784,
-        "mota": -6.1138022561380225
-      },
-      "stage": "S1_pedestrian",
-      "status": "OK",
-      "steps": 100,
-      "train_frames_exposed": 200,
-      "train_source_count": 154,
-      "train_view_sha256": "9dcab637be0a2d0ef266e633a1a794f90532cae7b9524f032abe3b44359988c2",
-      "video_count": 4
-    },
-    {
-      "checkpoint_bytes": 714989613,
-      "checkpoint_sha256": "aa5bc042b70e7cfdf7c7ce71cdd0876bf5ff1ec4f19c138f0fc69a790aece4da",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "13d1512726c86275167097a57b9b8f7c94e2c8113a85388d90793862e60b675f",
-      "frame_count": 320,
-      "label_protocol": "partial_label_pl_old_replay",
-      "method": "O2-CMOT",
-      "motion_mode": "category_conditioned",
-      "new": {
-        "hota_mean": 0.02080290884398009,
-        "idf1": 0.00933125972006221,
-        "mota": -2.901840490797546
-      },
-      "old": {
-        "hota_mean": 0.023374919783053876,
-        "idf1": 0.004658461236698867,
-        "mota": -13.210452472816556
-      },
-      "parent_checkpoint_sha256": "109c02a7e3b989450b114eca8051e10deba6382da12fed461609ce2c15d77c6b",
-      "raw_metric_artifact": "private-run-artifact:O2_S1_100/eval_trackeval_300.json",
-      "raw_metric_sha256": "11f8bb853f6ceaaa4cc3b172be8dc4b527b3a8a416d8a5ccd0c2dec9856d5d79",
-      "raw_prediction_artifact": "private-run-artifact:O2_S1_100/eval_independent_300.jsonl",
-      "raw_prediction_sha256": "8f0aee6df6b5690188a603f099e1fb85329983d80d9d7244c4a06c3cffaeb3ec",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.02323582297380735,
-        "idf1": 0.004911170643728802,
-        "mota": -12.652952886529528
-      },
-      "stage": "S1_pedestrian",
-      "status": "OK",
-      "steps": 300,
-      "train_frames_exposed": 600,
-      "train_source_count": 154,
-      "train_view_sha256": "9dcab637be0a2d0ef266e633a1a794f90532cae7b9524f032abe3b44359988c2",
-      "video_count": 4
-    },
-    {
-      "checkpoint_bytes": 712578111,
-      "checkpoint_sha256": "98ea507350aca0f949b82efaf1181d041b3b0730ec0c50262039f1ea7711e415",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "7c490b90bd53513a28f2e7dde056dd4b29f306ccef5770283bfbbf870fa7b1ca",
-      "frame_count": 320,
-      "label_protocol": "partial_label_pl_old_replay",
-      "method": "B1-PLR",
-      "motion_mode": "none",
-      "new": {
-        "hota_mean": 0.0,
-        "idf1": 0.0,
-        "mota": -11.625
-      },
-      "old": {
-        "hota_mean": 0.09210115431693756,
-        "idf1": 0.061342473722188005,
-        "mota": -2.451227604512276
-      },
-      "parent_checkpoint_sha256": "148c72afeabe47a702ef9418b03b1c26f7f00b7af943fd0fcb5e4fa141b160d4",
-      "raw_metric_artifact": "private-run-artifact:B1_S2_100/eval_trackeval_100.json",
-      "raw_metric_sha256": "0ebd4bf08976f549111316ac26fe761f58f12fec7f51597721345e976b42335a",
-      "raw_prediction_artifact": "private-run-artifact:B1_S2_100/eval_independent.jsonl",
-      "raw_prediction_sha256": "f7586af1e0ef97d73eb91baa6867f88f24aecca050acf4fbee7485c63a188a3c",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.09113357817178261,
-        "idf1": 0.060698035390241184,
-        "mota": -2.5476034143138544
-      },
-      "stage": "S2_truck",
-      "status": "OK",
-      "steps": 100,
-      "train_frames_exposed": 200,
-      "train_source_count": 154,
-      "train_view_sha256": "66eccf1d5653884f228e2a50ecf24bfe9e1c49a5f3e754fe1e25c8167ed2af4f",
-      "video_count": 4
-    },
-    {
-      "checkpoint_bytes": 712578559,
-      "checkpoint_sha256": "ef69880ddb5a55a2642cbff79626463062c35239d923bc8c3e53ed9ebb33dcc2",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "7c490b90bd53513a28f2e7dde056dd4b29f306ccef5770283bfbbf870fa7b1ca",
-      "frame_count": 320,
-      "label_protocol": "partial_label_pl_old_replay",
-      "method": "B1-PLR",
-      "motion_mode": "none",
-      "new": {
-        "hota_mean": 0.0,
-        "idf1": 0.0,
-        "mota": -10.03125
-      },
-      "old": {
-        "hota_mean": 0.020526035093107162,
-        "idf1": 0.004699228650150857,
-        "mota": -16.35799601857996
-      },
-      "parent_checkpoint_sha256": "148c72afeabe47a702ef9418b03b1c26f7f00b7af943fd0fcb5e4fa141b160d4",
-      "raw_metric_artifact": "private-run-artifact:B1_S2_100/eval_trackeval_300.json",
-      "raw_metric_sha256": "11f96488cc1a8823de20b32daf46838cb9162d50d6f043715364a510c90f15fe",
-      "raw_prediction_artifact": "private-run-artifact:B1_S2_100/eval_independent_300.jsonl",
-      "raw_prediction_sha256": "3e4f9607fc7e61d50c42e0811b11c6f170f8f5b34bdba531e7ec72c2db0aaca2",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.02031039716698128,
-        "idf1": 0.004649860522506463,
-        "mota": -16.291529875246226
-      },
-      "stage": "S2_truck",
-      "status": "OK",
-      "steps": 300,
-      "train_frames_exposed": 600,
-      "train_source_count": 154,
-      "train_view_sha256": "66eccf1d5653884f228e2a50ecf24bfe9e1c49a5f3e754fe1e25c8167ed2af4f",
-      "video_count": 4
-    },
-    {
-      "checkpoint_bytes": 714989229,
-      "checkpoint_sha256": "1a71212805a7fe78a46347d59c52ba846abf9315cac7494f23c0f8db97c02d0c",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "7c490b90bd53513a28f2e7dde056dd4b29f306ccef5770283bfbbf870fa7b1ca",
-      "frame_count": 320,
-      "label_protocol": "partial_label_pl_old_replay",
-      "method": "O2-CMOT",
-      "motion_mode": "category_conditioned",
-      "new": {
-        "hota_mean": 0.009568233085136173,
-        "idf1": 0.0,
-        "mota": -4.40625
-      },
-      "old": {
-        "hota_mean": 0.012064323527065263,
-        "idf1": 0.0017531342333939753,
-        "mota": -5.120769741207697
-      },
-      "parent_checkpoint_sha256": "aa5bc042b70e7cfdf7c7ce71cdd0876bf5ff1ec4f19c138f0fc69a790aece4da",
-      "raw_metric_artifact": "private-run-artifact:O2_S2_commonPL_100/eval_trackeval_100.json",
-      "raw_metric_sha256": "2c0d501458af6cb209fe2ab472558053cce4d34a03f0bf55e49873bce0550d1e",
-      "raw_prediction_artifact": "private-run-artifact:O2_S2_commonPL_100/eval_independent.jsonl",
-      "raw_prediction_sha256": "f5d8a0ca756622fcdd29760e18f370fb580507cdec40c6fcd1b39ff483c7d201",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.012038100646519717,
-        "idf1": 0.0017347165395434805,
-        "mota": -5.113263296126067
-      },
-      "stage": "S2_truck",
-      "status": "OK",
-      "steps": 100,
-      "train_frames_exposed": 200,
-      "train_source_count": 154,
-      "train_view_sha256": "66eccf1d5653884f228e2a50ecf24bfe9e1c49a5f3e754fe1e25c8167ed2af4f",
-      "video_count": 4
-    },
-    {
-      "checkpoint_bytes": 714989677,
-      "checkpoint_sha256": "2c152b34377a362dae85c2ec50e35ba924030fe320bcc26a1b0c883518bd980a",
-      "class_registry_sha256": "26f8f9e4d6c6a40108f3678c1a07c80a5d73099d6ad66b8de06ba19190370be1",
-      "config_sha256": "96b3bcc6f14debb1598eee1e7939df347cc35acd1a16d3f3f1063801e0de2d67",
-      "data_manifest_sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd",
-      "eval_view_sha256": "7c490b90bd53513a28f2e7dde056dd4b29f306ccef5770283bfbbf870fa7b1ca",
-      "frame_count": 320,
-      "label_protocol": "partial_label_pl_old_replay",
-      "method": "O2-CMOT",
-      "motion_mode": "category_conditioned",
-      "new": {
-        "hota_mean": 0.0,
-        "idf1": 0.0,
-        "mota": 0.0
-      },
-      "old": {
-        "hota_mean": 0.021791479065106215,
-        "idf1": 0.004983439154213713,
-        "mota": -16.868613138686133
-      },
-      "parent_checkpoint_sha256": "aa5bc042b70e7cfdf7c7ce71cdd0876bf5ff1ec4f19c138f0fc69a790aece4da",
-      "raw_metric_artifact": "private-run-artifact:O2_S2_commonPL_100/eval_trackeval_300.json",
-      "raw_metric_sha256": "4a4162e6ca006d1a426d6c0e8c0a20e7cd3e3cc2ffa06d9f30f4ca8b4c1199ac",
-      "raw_prediction_artifact": "private-run-artifact:O2_S2_commonPL_100/eval_independent_300.jsonl",
-      "raw_prediction_sha256": "fa4aae0e9e40da7a01e629976e0ab1c7c5f7ed145cea9b5caf22e1ab64a10438",
-      "scope": "pilot",
-      "seen": {
-        "hota_mean": 0.021562546914717706,
-        "idf1": 0.0049310852300722685,
-        "mota": -16.6913985554826
-      },
-      "stage": "S2_truck",
-      "status": "OK",
-      "steps": 300,
-      "train_frames_exposed": 600,
-      "train_source_count": 154,
-      "train_view_sha256": "66eccf1d5653884f228e2a50ecf24bfe9e1c49a5f3e754fe1e25c8167ed2af4f",
-      "video_count": 4
+      "motion_implementation": "one_step_residual_v2",
+      "motion_mode": "one_step_conditioned_v2",
+      "checkpoint_sha256": "ece02dd4056c3df7768390b58a89252803a910bd0b95a914656c49ae5b442cbf",
+      "resolved_config_sha256": "962a49e9df3256b24149c10fdc0fd1696fa32ac72df977d3e440a59233237191",
+      "train_view_sha256": "cd4ce1c43124c7af240fae6b56a7b005be9793347dec47338e2ed86f65552fae",
+      "replay_view_sha256": "0bf08d94615f1aef26a49b986354153f5eea34ad937e3c70c7773293be4106b2",
+      "memory_version": "ad07f270089a933f8c4cf4858d451fd6adc23e34f38aaec6837d7e82913d8f8a",
+      "sampler_plan_hash": "200a9d1a1452b464b360b24cdc77fad304a68c899b772f6a70ce366438e13094",
+      "prediction_artifact": "O2_S2_eval_v2.jsonl",
+      "prediction_sha256": "e9d43fc8757efb2be0ef644afb8234aa53e76c50461b179c06f9f7d78151a08f",
+      "metric_artifact": "O2_S2_trackeval_v2.json",
+      "metric_sha256": "affbbd318f9b859a68519dee8c284aff5843310b0e29e2f502de312861709a5b",
+      "exposure": {"frames_seen": 1200, "current_frames": 900, "replay_frames": 300, "video_ids_unique": 107, "annotations_by_source": {"gt": 1170, "gt_replay": 2528, "pl": 57790}, "invalid_dt_count": 0, "motion_advance_count": 54756},
+      "metrics": {
+        "car": {"role": "old", "hota": 0.18780315156372177, "hota_mean": 0.1431350597380561, "deta": 0.12768291908851026, "assa": 0.2762313392351011, "mota": -6.173966666666667, "idf1": 0.08468020778051173, "gt_dets": 30000, "pred_dets": 218724},
+        "pedestrian": {"role": "old", "hota": 0.011817545675530837, "hota_mean": 0.009166469221752687, "deta": 0.002857142857142857, "assa": 0.04887903502764015, "mota": -0.0005204267499349467, "idf1": 0.004144004144004144, "gt_dets": 3843, "pred_dets": 18},
+        "truck": {"role": "new", "hota": 0.0, "hota_mean": 0.0, "deta": 0.0, "assa": 0.0, "mota": -0.0008710801393728223, "idf1": 0.0, "gt_dets": 1148, "pred_dets": 1},
+        "all_seen": {"aggregation": "TrackEval_cls_comb_det_av", "hota": 0.1857168136069278, "hota_mean": 0.1416022008078818, "deta": 0.12490191123465492, "assa": 0.27614257072105286, "mota": -5.293418307564802, "idf1": 0.08307124784222848, "gt_dets": 34991, "pred_dets": 218743},
+        "all_seen_class_average": {"aggregation": "TrackEval_cls_comb_cls_av", "hota": 0.0665402324130842, "hota_mean": 0.05076717631993627, "deta": 0.04351335398188438, "assa": 0.10837012475424708, "mota": -2.058452724518658, "idf1": 0.029608070641505294, "gt_dets": 34991, "pred_dets": 218743}
+      }
     }
   ],
-  "schema_version": "cmot.public-results.v1",
-  "scope_note": "All non-asset rows are 4-video/320-frame pilot prefixes, not full BDD100K benchmark results.",
-  "unrun": [
-    {
-      "item": "S0_ref 300-step standalone training",
-      "reason": "20-step S0 smoke was used as the shared legal local starting point.",
-      "status": "NOT_RUN"
-    },
-    {
-      "item": "full BDD100K benchmark",
-      "reason": "This execution reports a fixed 4-video pilot prefix.",
-      "status": "NOT_RUN"
-    },
-    {
-      "item": "new bulk dataset download",
-      "reason": "The purified direct route could not resolve the official BDD archive host; no proxy fallback was used.",
-      "status": "NOT_RUN"
-    }
+  "not_run": [
+    "O1_S2",
+    "B0_FT",
+    "full_BDD100K_benchmark",
+    "TAO_full_training_and_evaluation",
+    "new_large_downloads",
+    "official_asset_metric_in_this_V2_run"
+  ],
+  "discarded_runs": [
+    {"name": "B1_repaired_S1_300", "reason": "replay view merged independent clips and could fabricate invalid dt; superseded by v2"},
+    {"name": "O1_residual_v2_S1_300", "reason": "stopped after invalid dt exposed the same replay-window issue; not reported"}
   ]
 }

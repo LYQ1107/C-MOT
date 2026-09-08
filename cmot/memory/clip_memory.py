@@ -165,43 +165,47 @@ class ClipReplayMemory:
 
     def as_view(self, stage_id: str, active_global_ids: Iterable[int], split: str = "train") -> dict:
         active = {int(value) for value in active_global_ids}
-        videos = {}
-        for clip in self.clips:
-            video_id = str(clip["video_id"])
-            out = videos.setdefault(video_id, {
-                "video_id": video_id,
-                "source_video_id": clip.get("source_video_id"),
-                "split": clip.get("split", split),
-                "dataset": "BDD100K MOT",
-                "image_root": clip.get("image_root"),
-                "frames": {},
-            })
+        # Keep every saved clip as an independent replay video.  Merging clips
+        # by source video would make the dataset build new windows across the
+        # gaps between independently selected historical snippets, fabricating
+        # dt and violating true consecutive-clip replay.
+        output_videos = []
+        for clip in sorted(self.clips, key=lambda value: str(value["clip_id"])):
+            clip_id = str(clip["clip_id"])
+            replay_video_id = "replay_%s" % hashlib.sha256(clip_id.encode("utf-8")).hexdigest()[:24]
+            frames = []
             for frame in clip.get("frames", []):
-                key = str(frame["frame_key"])
-                current = out["frames"].get(key)
-                if current is None:
-                    current = dict(frame)
-                    current["annotations"] = []
-                    out["frames"][key] = current
-                existing = {int(a["track_id"]) for a in current["annotations"]}
+                current = dict(frame)
+                current["annotations"] = []
                 for ann in frame.get("annotations", []):
-                    if int(ann["global_semantic_id"]) in active and int(ann["track_id"]) not in existing:
-                        value = dict(ann)
-                        value["label_source"] = "gt_replay"
-                        value["label_status"] = "reliable"
-                        current["annotations"].append(value)
-                current["exhaustive_global_ids"] = sorted(set(int(v) for v in frame.get("exhaustive_global_ids", []) if int(v) in active))
+                    if int(ann["global_semantic_id"]) not in active:
+                        continue
+                    value = dict(ann)
+                    value["label_source"] = "gt_replay"
+                    value["label_status"] = "reliable"
+                    current["annotations"].append(value)
+                current["exhaustive_global_ids"] = sorted(
+                    set(int(v) for v in frame.get("exhaustive_global_ids", []) if int(v) in active)
+                )
                 current["supervised_global_ids"] = list(current["exhaustive_global_ids"])
                 current["label_scope"] = "replay"
                 current["annotation_valid"] = True
                 current["ignore_regions"] = list(frame.get("ignore_regions", []))
-        output_videos = []
-        for value in videos.values():
-            value["frames"] = sorted(value["frames"].values(), key=lambda f: (int(f.get("frame_index", 0)), f["frame_key"]))
-            if value["frames"]:
-                value["width"] = int(value["frames"][0]["width"])
-                value["height"] = int(value["frames"][0]["height"])
-                output_videos.append(value)
+                frames.append(current)
+            if not frames:
+                continue
+            frames = sorted(frames, key=lambda f: (int(f.get("frame_index", 0)), f["frame_key"]))
+            output_videos.append({
+                "video_id": replay_video_id,
+                "replay_clip_id": clip_id,
+                "source_video_id": clip.get("source_video_id", clip.get("video_id")),
+                "split": clip.get("split", split),
+                "dataset": "BDD100K MOT",
+                "image_root": clip.get("image_root"),
+                "frames": frames,
+                "width": int(frames[0]["width"]),
+                "height": int(frames[0]["height"]),
+            })
         payload = {
             "schema_version": "cmot.v2",
             "manifest_kind": "replay_view",
@@ -210,7 +214,7 @@ class ClipReplayMemory:
             "split": split,
             "active_global_ids": sorted(active),
             "memory_version": self.version,
-            "videos": sorted(output_videos, key=lambda v: v["video_id"]),
+            "videos": output_videos,
         }
         payload["manifest_hash"] = canonical_json_hash(payload)
         return payload

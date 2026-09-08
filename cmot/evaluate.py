@@ -238,6 +238,16 @@ def evaluate_trackeval(
                 "gt_dets": int(count_data["GT_Dets"]),
                 "pred_dets": int(count_data["Dets"]),
             }
+        binding = dict(expected_binding or {})
+        for key in (
+            "checkpoint_sha256",
+            "teacher_checkpoint_sha256",
+            "resolved_config_sha256",
+            "view_manifest_hash",
+        ):
+            if key in files["prediction_metadata"]:
+                binding[key] = files["prediction_metadata"][key]
+        binding.setdefault("prediction_sha256", sha256_file(prediction_path))
         output = {
             "status": "OK",
             "evaluator": "TrackEval BDD100K + HOTA/CLEAR/Identity",
@@ -254,7 +264,7 @@ def evaluate_trackeval(
                 "aggregation": "TrackEval_cls_comb_cls_av",
                 **_combined_row(official_class),
             },
-            "checkpoint_binding": dict(expected_binding or {}),
+            "checkpoint_binding": binding,
             "prediction_sha256": sha256_file(prediction_path),
         }
     finally:
