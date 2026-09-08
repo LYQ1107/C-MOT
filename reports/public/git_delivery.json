@@ -4,8 +4,8 @@
   "delivery_branch": "fix/repair-v2",
   "review_base_commit": "cc488678df2ffdf5dd5103ce6380cfa9a2e9065f",
   "content_commit": "2a95303827a1b90bed352fe8c5fb42043411a5c7",
-  "remote_content_commit_verified": "PENDING_FINAL_REMOTE_CHECK",
-  "push_verified": false,
+  "remote_content_commit_verified": "2a95303827a1b90bed352fe8c5fb42043411a5c7",
+  "push_verified": true,
   "force_push": false,
   "note": "content_commit is the code/results commit; the final branch HEAD is reported in the handoff after the one remote SHA check."
 }
