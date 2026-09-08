@@ -89,4 +89,4 @@ checkpoint、prediction、metric、config、view、memory、sampler 和数据清
 | 新大型数据/依赖下载 | `NOT_RUN/null`；无代理回退 |
 | 早期错误回放窗口 run | `discarded`；不计入最终结果 |
 
-最终远端 branch 和 commit 以交付元数据及最终 handoff 为准；推送前字段保持 `PENDING_FINAL_COMMIT`，不会伪造 SHA。
+内容提交为 `2a95303827a1b90bed352fe8c5fb42043411a5c7`；最终远端 branch HEAD 在普通推送后的 handoff 中核对，未伪造远端 SHA。

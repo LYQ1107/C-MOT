@@ -5,8 +5,8 @@
   "remote": {
     "repository": "https://github.com/LYQ1107/C-MOT",
     "branch": "fix/repair-v2",
-    "final_commit": "PENDING_FINAL_COMMIT",
-    "remote_commit_verified": "NOT_RUN"
+    "content_commit": "2a95303827a1b90bed352fe8c5fb42043411a5c7",
+    "remote_content_commit_verified": "PENDING_FINAL_REMOTE_CHECK"
   },
   "scope": {
     "evaluation_scope": "pilot",
