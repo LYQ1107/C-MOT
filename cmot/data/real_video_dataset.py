@@ -57,7 +57,14 @@ def _instances(frame: dict, image_size: Tuple[int, int], active_global_ids: Sequ
         obj_ids.append(int(ann["track_id"]))
         dataset_category_ids.append(int(ann.get("dataset_category_id", -1)))
         score = ann.get("score")
-        label_weights.append(1.0 if ann.get("label_source") != "pl" or score is None else max(0.0, min(1.0, float(score))))
+        if ann.get("label_source") == "pl":
+            # Calibrated track reliability is the supervision weight.  The
+            # detector score is only a fallback for legacy PL snapshots.
+            reliability = ann.get("reliability")
+            value = reliability if reliability is not None else score
+            label_weights.append(1.0 if value is None else max(0.0, min(1.0, float(value))))
+        else:
+            label_weights.append(1.0)
         label_sources.append(source_to_int.get(ann.get("label_source", "gt"), -1))
     target = Instances(
         image_size,
@@ -127,16 +134,21 @@ class ContinualVideoDataset(Dataset):
                     time_valid = all(t is not None and math.isfinite(float(t)) for t in timestamps) and all(
                         float(timestamps[j + 1]) > float(timestamps[j]) for j in range(self.clip_len - 1)
                     )
+                    # Sampling plans are independent of PL availability.  A
+                    # current clip is focused by legal GT/replay annotations;
+                    # a PL row must not change which clips a method sees.
                     focus = sorted({
                         int(a["global_semantic_id"])
                         for f in selected
                         for a in f.get("annotations", [])
                         if int(a.get("global_semantic_id", -1)) in self.focus_global_ids
+                        and a.get("label_source", "gt") in ("gt", "gt_replay")
                     })
                     index.append({
                         "stream": video.get("stream", "current"),
                         "video_id": str(video["video_id"]),
                         "source_video_id": str(video.get("source_video_id", video["video_id"])),
+                        "source_video_uid": str(video.get("source_video_uid") or video.get("source_video_id") or video["video_id"]),
                         "image_root": video.get("image_root"),
                         "frames": selected,
                         "start": int(start),
@@ -166,6 +178,8 @@ class ContinualVideoDataset(Dataset):
                 "frame_key": frame["frame_key"],
                 "video_id": item["video_id"],
                 "source_video_id": item["source_video_id"],
+                "source_video_uid": str(frame.get("source_video_uid") or item.get("source_video_uid") or item["source_video_id"]),
+                "frame_uid": str(frame.get("frame_uid") or frame["frame_key"]),
                 "frame_index": int(frame["frame_index"]),
                 "timestamp_s": timestamp,
                 "motion_time_valid": bool(item["motion_time_valid"]),
@@ -187,7 +201,7 @@ class ContinualVideoDataset(Dataset):
                 "stream": item.get("stream", "current"),
                 "focus_class": item.get("focus_class"),
                 "focus_global_ids": item.get("focus_global_ids", []),
-                "source_video_uid": item["source_video_id"],
+                "source_video_uid": str(item.get("source_video_uid") or item["source_video_id"]),
                 "augmentation_seed": int(hashlib.sha256(item["clip_id"].encode("utf-8")).hexdigest()[:8], 16),
             },
         }

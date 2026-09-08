@@ -30,6 +30,8 @@ def infer_checkpoint(
     video_ids: Optional[Sequence[str]] = None,
     alignment: bool = True,
     checkpoint_role: str = "trained",
+    allow_vocab_expansion: bool = False,
+    evaluation_vocabulary_override: Optional[Mapping[str, object]] = None,
 ) -> dict:
     """Bind one checkpoint, one immutable view and one prediction artifact."""
     resolved = dict(resolved_config or {})
@@ -44,8 +46,8 @@ def infer_checkpoint(
         clip_len=int(dict(resolved.get("training", {})).get("clip_frames", 4)),
         motion_mode=str(dict(resolved.get("motion", {})).get("mode", "none")),
         label_mode="partial" if str(resolved.get("stage", "")).startswith(("S1", "S2")) else "complete",
-        score_threshold=float(inference_cfg.get("score_threshold", 0.19)),
-        filter_threshold=float(inference_cfg.get("filter_threshold", 0.19)),
+        score_threshold=float(inference_cfg.get("birth_threshold", inference_cfg.get("score_threshold", 0.19))),
+        filter_threshold=float(inference_cfg.get("keep_threshold", inference_cfg.get("filter_threshold", 0.19))),
         miss_tolerance=int(inference_cfg.get("miss_tolerance", 5)),
         maximum_quantity=int(inference_cfg.get("maximum_quantity", 160)),
         alignment=alignment,
@@ -55,12 +57,25 @@ def infer_checkpoint(
         model,
         checkpoint,
         init_mode="resume",
-        expected_metadata={
-            "active_global_ids": list(active_global_ids),
+        expected_metadata=({
+            **({} if allow_vocab_expansion else {"active_global_ids": list(active_global_ids)}),
             "motion_mode": str(dict(resolved.get("motion", {})).get("mode", "none")),
-        } if resolved else None,
+        } if resolved else None),
     )
     view_manifest_hash = json.loads(Path(view).read_text(encoding="utf-8")).get("manifest_hash")
+    prediction_metadata = {
+        "checkpoint_sha256": audit["sha256"],
+        "active_global_ids": list(active_global_ids),
+        "resolved_config_sha256": canonical_json_hash(resolved) if resolved else None,
+        "view_manifest_hash": view_manifest_hash,
+    }
+    if evaluation_vocabulary_override is not None:
+        # A zero-step vocabulary comparison is allowed to change only the
+        # evaluation active-ID list.  Keep that exception explicit in the
+        # prediction artifact so it cannot be mistaken for a training run.
+        prediction_metadata["evaluation_vocabulary_override"] = dict(evaluation_vocabulary_override)
+    if "teacher" in str(checkpoint_role).lower():
+        prediction_metadata["teacher_checkpoint_sha256"] = audit["sha256"]
     result = run_video_inference(
         model,
         view,
@@ -69,13 +84,7 @@ def infer_checkpoint(
         split,
         video_ids=video_ids,
         input_size=tuple(dict(resolved.get("training", {})).get("input_size", [640, 360])),
-        metadata={
-            "checkpoint_sha256": audit["sha256"],
-            "teacher_checkpoint_sha256": audit["sha256"],
-            "active_global_ids": list(active_global_ids),
-            "resolved_config_sha256": canonical_json_hash(resolved) if resolved else None,
-            "view_manifest_hash": view_manifest_hash,
-        },
+        metadata=prediction_metadata,
     )
     result.update({
         "method": checkpoint_role,

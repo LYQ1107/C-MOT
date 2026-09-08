@@ -282,67 +282,106 @@ def attention_protection(outputs_class, num_queries, layer_id, isol_ratio=None):
         isolate_mask = None
     return isolate_mask
 
-def protect_track_preds(track_instances, num_queries=900, duplicate_iou=0.9):
-    """Mark duplicate detections without mutating tracker age or IDs.
+def protect_track_preds(
+    track_instances,
+    num_queries=900,
+    birth_threshold=0.50,
+    keep_threshold=0.20,
+    duplicate_iou=0.85,
+    duplicate_feature_cos=0.95,
+    dedup_new_new=True,
+    dedup_new_track=True,
+    merge_existing_ids=False,
+):
+    """Mark same-class duplicate rows without changing IDs or tracker age.
 
-    The previous helper both removed query rows and incremented
-    ``disappear_time``.  That made one duplicate suppression event look like a
-    missing observation and also shifted the query/ID correspondence.  The
-    tracker now owns ageing; this function only marks rows which must not be
-    exported or assigned a fresh ID for the current frame.
+    The function is deliberately a pure suppression pass.  ``RuntimeTrackerBase``
+    is the only owner of birth, ageing and ID allocation.  Existing IDs are
+    never merged; ``merge_existing_ids`` is accepted for explicit call-site
+    validation and must remain false for V3.
     """
+    if merge_existing_ids:
+        raise ValueError("C-MOT V3 forbids merging existing track IDs")
     count = len(track_instances)
     device = track_instances.scores.device
-    suppressed = torch.zeros(count, dtype=torch.bool, device=device)
+    suppressed = (
+        track_instances.suppressed_this_frame.bool().clone()
+        if track_instances.has("suppressed_this_frame")
+        else torch.zeros(count, dtype=torch.bool, device=device)
+    )
     if count == 0:
         track_instances.suppressed_this_frame = suppressed
-        return track_instances, {"suppressed": 0, "track_duplicates": 0, "detection_shields": 0}
+        return track_instances, {"suppressed": 0, "track_duplicates": 0, "detection_shields": 0, "new_new": 0, "new_track": 0}
 
-    boxes = box_cxcywh_to_xyxy(track_instances.pred_boxes.unsqueeze(0))[0]
+    boxes = box_cxcywh_to_xyxy(track_instances.pred_boxes).detach()
     ious = bbox_overlaps(boxes.unsqueeze(0), boxes.unsqueeze(0), mode="iou")[0]
-    scores = track_instances.scores
+    scores = track_instances.scores.detach()
     obj_idxes = track_instances.obj_idxes
     classes = track_instances.cls_idxes if track_instances.has("cls_idxes") else torch.full_like(obj_idxes, -1)
     track_end = min(int(num_queries), count)
+    features = track_instances.output_embedding_img.detach() if track_instances.has("output_embedding_img") else None
 
-    # Keep the strongest already-tracked query for each highly-overlapping
-    # same-class group.  Existing IDs are deliberately not aged here.
-    tracked = [
-        int(index) for index in range(track_end, count)
-        if int(obj_idxes[index]) >= 0 and float(scores[index]) >= 0.19
-    ]
-    tracked.sort(key=lambda index: (-float(scores[index]), index))
-    accepted = []
-    for index in tracked:
-        duplicate = any(
-            int(classes[index]) == int(classes[other])
-            and float(ious[index, other]) >= float(duplicate_iou)
-            for other in accepted
+    def feature_duplicate(left, right):
+        if features is None or duplicate_feature_cos is None:
+            return False
+        left_norm = float(features[left].norm().item())
+        right_norm = float(features[right].norm().item())
+        # A zero vector carries no appearance evidence and must not satisfy a
+        # cosine gate merely because both zero vectors have dot product zero.
+        if left_norm <= 1e-12 or right_norm <= 1e-12:
+            return False
+        cosine = float(torch.dot(features[left], features[right]).item() / (left_norm * right_norm))
+        return cosine >= float(duplicate_feature_cos)
+
+    def duplicate(left, right):
+        return (
+            int(classes[left]) == int(classes[right])
+            and (float(ious[left, right]) >= float(duplicate_iou) or feature_duplicate(left, right))
         )
-        if duplicate:
-            suppressed[index] = True
-        else:
-            accepted.append(index)
 
-    # A new detection which overlaps an accepted track must not shield the
-    # track or create a duplicate ID.  Do not compare against suppressed
-    # tracks, and do not suppress low-confidence detections before the normal
-    # tracker threshold has a chance to handle them.
-    for index in range(track_end):
-        if float(scores[index]) < 0.19:
-            continue
-        if any(
-            int(classes[index]) == int(classes[other])
-            and float(ious[index, other]) >= float(duplicate_iou)
-            for other in accepted
-        ):
+    # Existing tracks are ordered by score.  Lower-scoring repeated rows may
+    # be suppressed, but their object IDs are retained for the tracker to age
+    # exactly once.
+    existing = [
+        int(index) for index in range(track_end, count)
+        if int(obj_idxes[index]) >= 0 and float(scores[index]) >= float(keep_threshold)
+        and not bool(suppressed[index])
+    ]
+    existing.sort(key=lambda index: (-float(scores[index]), index))
+    accepted_existing = []
+    track_duplicates = 0
+    for index in existing:
+        if any(duplicate(index, other) for other in accepted_existing):
             suppressed[index] = True
+            track_duplicates += 1
+        else:
+            accepted_existing.append(index)
+
+    new_candidates = [
+        int(index) for index in range(track_end)
+        if int(obj_idxes[index]) < 0 and float(scores[index]) >= float(birth_threshold)
+        and not bool(suppressed[index])
+    ]
+    new_candidates.sort(key=lambda index: (-float(scores[index]), index))
+    accepted_new = []
+    new_new = new_track = 0
+    for index in new_candidates:
+        repeated_new = bool(dedup_new_new) and any(duplicate(index, other) for other in accepted_new)
+        repeated_track = bool(dedup_new_track) and any(duplicate(index, other) for other in accepted_existing)
+        if repeated_new or repeated_track:
+            suppressed[index] = True
+            new_new += int(repeated_new)
+            new_track += int(repeated_track)
+        else:
+            accepted_new.append(index)
 
     track_instances.suppressed_this_frame = suppressed
     return track_instances, {
         "suppressed": int(suppressed.sum().item()),
-        "track_duplicates": int(suppressed[track_end:].sum().item()),
+        "track_duplicates": int(track_duplicates),
         "detection_shields": int(suppressed[:track_end].sum().item()),
+        "new_new": int(new_new),
+        "new_track": int(new_track),
     }
 
 def protect_det_preds(outputs, num_queries=900):  

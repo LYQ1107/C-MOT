@@ -48,9 +48,6 @@ def make_model(
     args.with_box_refine = True
     args.calculate_negative_samples = True
     args.max_len = 250
-    args.score_thresh = [float(score_threshold)]
-    args.filter_score_thresh = [float(filter_threshold)]
-    args.miss_tolerance = [int(miss_tolerance)]
     cfg = SLConfig.fromfile(config_file)
     cfg.train_with_artificial_img_seqs = False
     cfg.use_checkpoint_track = False
@@ -63,15 +60,29 @@ def make_model(
     registry.set_active(names)
     cfg.cmot_class_registry = registry
     resolved = dict(resolved_config or {})
+    # Resolve once, then assign the final values to the actual OVTR args and
+    # model attributes.  Earlier V2 code set the parser defaults first and
+    # accidentally let those values win over the YAML contract.
     motion_cfg = dict(resolved.get("motion", {}))
     inference_cfg = dict(resolved.get("inference", {}))
+    supervision_cfg = dict(resolved.get("supervision", {}))
+    distillation_cfg = dict(resolved.get("distillation", {}))
     if resolved:
         motion_mode = str(motion_cfg.get("mode", motion_mode))
         label_mode = "partial" if str(resolved.get("stage", "")).startswith("S1") or str(resolved.get("stage", "")).startswith("S2") else label_mode
-        score_threshold = float(inference_cfg.get("score_threshold", score_threshold))
-        filter_threshold = float(inference_cfg.get("filter_threshold", filter_threshold))
+        score_threshold = float(inference_cfg.get("birth_threshold", inference_cfg.get("score_threshold", score_threshold)))
+        filter_threshold = float(inference_cfg.get("keep_threshold", inference_cfg.get("filter_threshold", filter_threshold)))
         miss_tolerance = int(inference_cfg.get("miss_tolerance", miss_tolerance))
         maximum_quantity = int(inference_cfg.get("maximum_quantity", maximum_quantity))
+    args.score_thresh = [float(score_threshold)]
+    args.filter_score_thresh = [float(filter_threshold)]
+    args.miss_tolerance = [int(miss_tolerance)]
+    cfg.cmot_protocol_role = str(resolved.get("protocol_role", "cil"))
+    cfg.cmot_pl_iou_min = float(supervision_cfg.get("quality_iou_min", 0.5))
+    cfg.cmot_lambda_gt = float(supervision_cfg.get("lambda_gt", 1.0))
+    cfg.cmot_lambda_pl = float(supervision_cfg.get("lambda_pl", 0.25))
+    cfg.cmot_pl_warmup_steps = int(supervision_cfg.get("pl_warmup_steps", 100))
+    cfg.cmot_distillation_cfg = distillation_cfg
     cfg.cmot_motion_mode = motion_mode
     cfg.cmot_motion_loss_coef = float(motion_cfg.get("lambda_motion", 0.1))
     cfg.cmot_motion_velocity_limit = float(motion_cfg.get("velocity_limit", 1.25))
@@ -80,22 +91,57 @@ def make_model(
     cfg.cmot_motion_detach_reference = bool(motion_cfg.get("detach_reference", True))
     cfg.cmot_motion_max_dt = float(motion_cfg.get("max_dt", 2.0))
     cfg.cmot_inference_dedup_enabled = bool(inference_cfg.get("inference_dedup_enabled", True))
-    cfg.cmot_duplicate_iou = float(inference_cfg.get("duplicate_iou", 0.9))
+    cfg.cmot_birth_threshold = float(inference_cfg.get("birth_threshold", score_threshold))
+    cfg.cmot_keep_threshold = float(inference_cfg.get("keep_threshold", filter_threshold))
+    cfg.cmot_export_threshold = float(inference_cfg.get("export_threshold", score_threshold))
+    cfg.cmot_duplicate_iou = float(inference_cfg.get("duplicate_iou", 0.85))
+    cfg.cmot_duplicate_feature_cos = float(inference_cfg.get("duplicate_feature_cos", 0.95))
+    cfg.cmot_dedup_new_new = bool(inference_cfg.get("dedup_new_new", True))
+    cfg.cmot_dedup_new_track = bool(inference_cfg.get("dedup_new_track", True))
+    cfg.cmot_merge_existing_ids = bool(inference_cfg.get("merge_existing_ids", False))
     cfg.cmot_label_mode = label_mode
     cfg.cmot_continual_cfg = {
         "motion_mode": motion_mode,
         "maximum_quantity": int(maximum_quantity),
-        "ious_thresh": float(inference_cfg.get("duplicate_iou", 0.9)),
+        "birth_threshold": cfg.cmot_birth_threshold,
+        "keep_threshold": cfg.cmot_keep_threshold,
+        "export_threshold": cfg.cmot_export_threshold,
+        "ious_thresh": cfg.cmot_duplicate_iou,
         "velocity_limit": cfg.cmot_motion_velocity_limit,
         "warmup_steps": cfg.cmot_motion_warmup_steps,
         "detach_features": cfg.cmot_motion_detach_features,
         "detach_reference": cfg.cmot_motion_detach_reference,
         "max_dt": cfg.cmot_motion_max_dt,
         "duplicate_iou": cfg.cmot_duplicate_iou,
+        "duplicate_feature_cos": cfg.cmot_duplicate_feature_cos,
+        "dedup_new_new": cfg.cmot_dedup_new_new,
+        "dedup_new_track": cfg.cmot_dedup_new_track,
+        "merge_existing_ids": cfg.cmot_merge_existing_ids,
     }
     cfg.cmot_runtime_config = resolved
     model, criterion = build_model(args, cfg)
     model.to(torch.device(device))
+    if getattr(model, "track_base", None) is not None:
+        actual = {
+            "birth_threshold": float(model.track_base.birth_threshold),
+            "keep_threshold": float(model.track_base.keep_threshold),
+            "export_threshold": float(model.track_base.export_threshold),
+            "miss_tolerance": int(model.track_base.miss_tolerance),
+            "maximum_quantity": int(model.track_base.maximum_quantity),
+        }
+        expected = {
+            "birth_threshold": cfg.cmot_birth_threshold,
+            "keep_threshold": cfg.cmot_keep_threshold,
+            "export_threshold": cfg.cmot_export_threshold,
+            "miss_tolerance": miss_tolerance,
+            "maximum_quantity": maximum_quantity,
+        }
+        for key, value in expected.items():
+            if isinstance(value, float):
+                if abs(actual[key] - value) > 1e-8:
+                    raise AssertionError("runtime inference mapping failed for %s: %s != %s" % (key, actual[key], value))
+            elif actual[key] != value:
+                raise AssertionError("runtime inference mapping failed for %s: %s != %s" % (key, actual[key], value))
     return model, criterion, registry, args, cfg
 
 
@@ -242,8 +288,10 @@ def run_video_inference(
                     },
                 )
                 record["video_id"] = video["video_id"]
-                record["video_uid"] = video["video_id"]
+                record["source_video_uid"] = str(video.get("source_video_uid") or video.get("source_video_id") or video["video_id"])
+                record["video_uid"] = record["source_video_uid"]
                 record["frame_index"] = int(frame["frame_index"])
+                record["frame_uid"] = str(frame.get("frame_uid") or frame["frame_key"])
                 record["width"] = int(frame["width"])
                 record["height"] = int(frame["height"])
                 handle.write(json.dumps(record, sort_keys=True) + "\n")

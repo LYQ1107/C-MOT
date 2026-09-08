@@ -20,6 +20,7 @@ from util.misc import (NestedTensor, nested_tensor_from_tensor_list, get_world_s
 from detectron2.structures import Instances, Boxes, matched_boxlist_iou
 from .backbone import build_backbone
 from .matcher import build_matcher
+from .matcher import QualityAwarePLMatcher
 from .transformer import build_transformer
 from .updater import build as build_updater
 from .deformable_detr import SetCriterion
@@ -27,6 +28,7 @@ from .segmentation import sigmoid_focal_loss
 
 from util.clip_utils import load_embeddings
 from .utils import MLP, protect_det_preds, protect_track_preds, preprocess_for_masks
+from cmot.losses.supervision import ClassificationSupervision, LossAccumulator, focal_binary_loss
 from util.list_LVIS import Frequency_list_total_1, Frequency_list_70, novel_class
 
 class TrackerPostProcess(nn.Module):
@@ -49,6 +51,9 @@ class TrackerPostProcess(nn.Module):
 
         prob = out_logits.sigmoid()
         scores, labels = prob.max(-1)
+        if track_instances.has("assigned_column"):
+            labels = track_instances.assigned_column.to(device=prob.device, dtype=torch.long)
+            scores = prob.gather(1, labels[:, None]).squeeze(1)
 
         # convert to [x0, y0, x1, y1] format
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
@@ -71,12 +76,20 @@ def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
 class RuntimeTrackerBase(object):
-    def __init__(self, score_thresh=0.6, filter_score_thresh=0.6, miss_tolerance=5, maximum_quantity=50):
-        self.score_thresh = 0.6 if score_thresh is None else score_thresh
-        self.filter_score_thresh = 0.6 if filter_score_thresh is None else filter_score_thresh
-        self.miss_tolerance = 5 if miss_tolerance is None else miss_tolerance
+    def __init__(self, score_thresh=0.6, filter_score_thresh=0.6, miss_tolerance=5, maximum_quantity=50,
+                 birth_threshold=None, keep_threshold=None, export_threshold=None):
+        # Preserve upstream attribute names while exposing V3's separate
+        # birth, internal-keep and public-export thresholds.
+        self.birth_threshold = float(0.6 if birth_threshold is None and score_thresh is None else
+                                     (score_thresh if birth_threshold is None else birth_threshold))
+        self.keep_threshold = float(0.6 if keep_threshold is None and filter_score_thresh is None else
+                                    (filter_score_thresh if keep_threshold is None else keep_threshold))
+        self.export_threshold = float(self.birth_threshold if export_threshold is None else export_threshold)
+        self.score_thresh = self.birth_threshold
+        self.filter_score_thresh = self.keep_threshold
+        self.miss_tolerance = int(5 if miss_tolerance is None else miss_tolerance)
         self.max_obj_id = 0
-        self.maximum_quantity = 50 if maximum_quantity is None else maximum_quantity
+        self.maximum_quantity = int(50 if maximum_quantity is None else maximum_quantity)
 
     def clear(self):
         self.max_obj_id = 0
@@ -93,19 +106,59 @@ class RuntimeTrackerBase(object):
                 discard_mask[_track_discard] = True
                 suppressed = suppressed | discard_mask
             track_instances.suppressed_this_frame = suppressed
-        cancel_disappear = (track_instances.scores >= self.score_thresh) & (~suppressed)
-        track_instances.disappear_time[cancel_disappear] = 0
-        # Suppressed new detections are removed; suppressed existing tracks are
-        # retained so aging occurs exactly once in this runtime.
-        score_indx = (track_instances.scores >= self.score_thresh) & (~suppressed)
-        obj_indx = track_instances.obj_idxes != -1
-        valid_indx = score_indx | obj_indx
+        scores = track_instances.scores
+        valid_box = (torch.isfinite(track_instances.pred_boxes).all(dim=-1)
+                     if track_instances.has("pred_boxes") else torch.ones_like(scores, dtype=torch.bool))
+        observed_before = (scores >= self.keep_threshold) & (~suppressed) & valid_box
+        new_birth_before = (scores >= self.birth_threshold) & (~suppressed) & valid_box
+        existing_before = track_instances.obj_idxes >= 0
+        valid_indx = new_birth_before | existing_before | (track_instances.obj_idxes == -2)
         track_instances = track_instances[valid_indx]
+        observed = observed_before[valid_indx]
+        new_birth = new_birth_before[valid_indx]
 
         if len(track_instances) > self.maximum_quantity:
             top_indices = self.quantity_filter(track_instances, self.maximum_quantity)
             track_instances = track_instances[top_indices]
+            observed = observed[top_indices]
+            new_birth = new_birth[top_indices]
 
+        if not track_instances.has("observed_this_frame"):
+            track_instances.observed_this_frame = torch.zeros(
+                len(track_instances), dtype=torch.bool, device=scores.device)
+        if not track_instances.has("export_valid"):
+            track_instances.export_valid = torch.zeros(
+                len(track_instances), dtype=torch.bool, device=scores.device)
+        if not track_instances.has("export_scores"):
+            track_instances.export_scores = track_instances.scores.clone()
+        for i in range(len(track_instances)):
+            obj_id = int(track_instances.obj_idxes[i].item())
+            if obj_id == -2:
+                track_instances.observed_this_frame[i] = False
+                track_instances.export_valid[i] = False
+                continue
+            if obj_id == -1 and bool(new_birth[i].item()) and not bool(track_instances.suppressed_this_frame[i].item()):
+                track_instances.obj_idxes[i] = self.max_obj_id
+                self.max_obj_id += 1
+                obj_id = int(track_instances.obj_idxes[i].item())
+            is_observed = bool(observed[i].item()) and not bool(track_instances.suppressed_this_frame[i].item())
+            track_instances.observed_this_frame[i] = bool(obj_id >= 0 and is_observed)
+            if obj_id >= 0:
+                if is_observed:
+                    track_instances.disappear_time[i] = 0
+                elif not is_repeat:
+                    # Suppression and low score each age once here; the
+                    # duplicate helper never touches disappear_time.
+                    track_instances.disappear_time[i] += 1
+                    if int(track_instances.disappear_time[i].item()) >= self.miss_tolerance:
+                        track_instances.obj_idxes[i] = -1
+                        obj_id = -1
+            track_instances.export_valid[i] = bool(
+                obj_id >= 0 and is_observed and float(track_instances.scores[i].item()) >= self.export_threshold)
+        return track_instances
+
+        # Kept unreachable for source compatibility with the upstream patch;
+        # the V3 implementation above owns all runtime state transitions.
         for i in range(len(track_instances)):
             if track_instances.obj_idxes[i] == -2:
                 continue
@@ -196,6 +249,12 @@ class OVFrameMatcher(SetCriterion):
                         train_with_artificial_img_seqs=False,
                         label_mode='complete',
                         motion_mode='none',
+                        class_registry=None,
+                        protocol_role='cil',
+                        pl_iou_min=0.5,
+                        lambda_gt=1.0,
+                        lambda_pl=0.25,
+                        pl_warmup_steps=100,
                         ):
         """ Create the criterion.
         Parameters:
@@ -221,6 +280,31 @@ class OVFrameMatcher(SetCriterion):
         self.label_mode = label_mode
         self.motion_mode = motion_mode
         self.frame_metadata = []
+        self.class_registry = class_registry
+        self.protocol_role = str(protocol_role)
+        self.pl_matcher = QualityAwarePLMatcher(
+            cost_class=getattr(matcher, "cost_class", 1.0),
+            cost_bbox=getattr(matcher, "cost_bbox", 1.0),
+            cost_giou=getattr(matcher, "cost_giou", 1.0),
+            iou_min=float(pl_iou_min),
+        )
+        self.pl_iou_min = float(pl_iou_min)
+        self.lambda_gt = float(lambda_gt)
+        self.lambda_pl = float(lambda_pl)
+        self.pl_warmup_steps = int(pl_warmup_steps)
+        self.training_step = 0
+        self.loss_accumulator = LossAccumulator()
+        self._normalizers = {}
+        self._loss_layer_tag = 0
+        self.last_supervision_diagnostics = {}
+
+    def set_training_step(self, step: int) -> None:
+        self.training_step = int(step)
+
+    def effective_pl_lambda(self) -> float:
+        if self.pl_warmup_steps <= 0:
+            return self.lambda_pl
+        return self.lambda_pl * min(1.0, float(self.training_step) / float(self.pl_warmup_steps))
 
     def initialize(self, gt_instances: List[Instances], frame_metadata=None):
         self.gt_instances = gt_instances
@@ -230,6 +314,10 @@ class OVFrameMatcher(SetCriterion):
         self.sample_device = None
         self._current_frame_idx = 0
         self.losses_dict = {}
+        self.loss_accumulator.clear()
+        self._normalizers = {}
+        self._loss_layer_tag = 0
+        self.last_supervision_diagnostics = {}
 
     def _step(self):
         self._current_frame_idx += 1
@@ -568,7 +656,7 @@ class OVFrameMatcher(SetCriterion):
         def match_for_single_decoder_layer(unmatched_outputs, unmatched_track_idxes):
             matches = []
             available_queries = unmatched_track_idxes
-            for target_indexes in (gt_target_indexes, pl_target_indexes):
+            for target_indexes, is_pl in ((gt_target_indexes, False), (pl_target_indexes, True)):
                 if len(available_queries) == 0 or len(target_indexes) == 0:
                     continue
                 subset_targets = gt_instances_i[target_indexes]
@@ -577,7 +665,13 @@ class OVFrameMatcher(SetCriterion):
                     "pred_boxes": unmatched_outputs["pred_boxes"][:, available_queries],
                     "select_id": unmatched_outputs["select_id"],
                 }
-                local_indices = self.matcher(subset_outputs, [subset_targets])[0]
+                local_indices = (self.pl_matcher(subset_outputs, [subset_targets])[0]
+                                 if is_pl else self.matcher(subset_outputs, [subset_targets])[0])
+                if is_pl:
+                    self.last_supervision_diagnostics["pl_match_candidates"] = float(
+                        self.last_supervision_diagnostics.get("pl_match_candidates", 0.0) + self.pl_matcher.last_diagnostics.get("candidates", 0))
+                    self.last_supervision_diagnostics["pl_match_accepted"] = float(
+                        self.last_supervision_diagnostics.get("pl_match_accepted", 0.0) + self.pl_matcher.last_diagnostics.get("accepted", 0))
                 if len(local_indices[0]) == 0:
                     continue
                 source = available_queries[local_indices[0]]
@@ -614,7 +708,10 @@ class OVFrameMatcher(SetCriterion):
         matched_indices = torch.cat([new_matched_indices, prev_matched_indices], dim=0)
 
         # step8. calculate losses.
-        self.num_samples += len(gt_instances_i) + num_disappear_track
+        self.num_samples += sum(
+            1 for index in range(len(gt_instances_i))
+            if (not gt_instances_i.has("label_sources") or int(gt_instances_i.label_sources[index].item()) in (0, 1, 2))
+        )
         self.sample_device = device
 
         for loss in self.losses:
@@ -628,6 +725,10 @@ class OVFrameMatcher(SetCriterion):
 
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
+                # The normalizer namespace is (frame, decoder layer).  Keep
+                # auxiliary supervision from overwriting the main-layer
+                # source counts.
+                self._loss_layer_tag = int(i) + 1
 
                 # Shield and match individually for each layer.
                 if self.train_with_artificial_img_seqs:
@@ -693,6 +794,7 @@ class OVFrameMatcher(SetCriterion):
                         {'frame_{}_aux{}_{}'.format(self._current_frame_idx, i, key): value for key, value in
                          l_dict.items()})
 
+        self._loss_layer_tag = 0
         self._step()
         return track_instances
 
@@ -703,6 +805,240 @@ class OVFrameMatcher(SetCriterion):
         loss_avg = {}
         for loss_name, _ in losses.items():
             loss_avg[loss_name] = losses[loss_name] / (normalizer_motion if "loss_motion" in loss_name else normalizer_det)
+        return loss_avg
+
+
+    @staticmethod
+    def _pair_iou(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        left = box_ops.box_cxcywh_to_xyxy(left)
+        right = box_ops.box_cxcywh_to_xyxy(right)
+        lt = torch.maximum(left[..., :2], right[..., :2])
+        rb = torch.minimum(left[..., 2:], right[..., 2:])
+        wh = (rb - lt).clamp(min=0)
+        inter = wh[..., 0] * wh[..., 1]
+        area_l = (left[..., 2] - left[..., 0]).clamp(min=0) * (left[..., 3] - left[..., 1]).clamp(min=0)
+        area_r = (right[..., 2] - right[..., 0]).clamp(min=0) * (right[..., 3] - right[..., 1]).clamp(min=0)
+        return inter / (area_l + area_r - inter).clamp(min=1e-8)
+
+    def build_classification_targets(self, logits, select_id, gt_instances, indices, frame_metadata, label_mode):
+        """Build V3 masks once; GT mutex negatives never come from PL."""
+        batch, queries, columns = logits.shape
+        target = torch.zeros_like(logits)
+        gt_mask = torch.zeros_like(logits, dtype=torch.bool)
+        gt_weights = torch.ones_like(logits)
+        pl_mask = torch.zeros_like(logits, dtype=torch.bool)
+        pl_weights = torch.zeros_like(logits)
+        matched_iou = torch.zeros((batch, queries), dtype=logits.dtype, device=logits.device)
+        trusted = torch.zeros((batch, queries), dtype=torch.bool, device=logits.device)
+        matched_source = torch.full((batch, queries), -1, dtype=torch.long, device=logits.device)
+        select_id = select_id.to(logits.device) if torch.is_tensor(select_id) else torch.as_tensor(select_id, device=logits.device)
+        gt_counts = []
+        pl_counts = {}
+        for batch_index in range(batch):
+            meta = frame_metadata[batch_index] if batch_index < len(frame_metadata) else {}
+            if not bool(meta.get("annotation_valid", True)):
+                gt_counts.append(0)
+                continue
+            exhaustive = meta.get("exhaustive_global_ids", meta.get("supervised_global_ids", []))
+            if label_mode == "complete" and not exhaustive:
+                exhaustive = meta.get("active_global_ids", [])
+            for global_id in exhaustive:
+                match = (select_id == int(global_id)).nonzero(as_tuple=False).flatten()
+                if match.numel():
+                    gt_mask[batch_index, :, match] = True
+            gt_count = 0
+            for index in range(len(gt_instances[batch_index])):
+                source = int(gt_instances[batch_index].label_sources[index].item()) if gt_instances[batch_index].has("label_sources") else 0
+                if source in (0, 1):
+                    gt_count += 1
+            src_idx, tgt_idx = indices[batch_index]
+            for source_index, target_index in zip(src_idx.tolist(), tgt_idx.tolist()):
+                source_index = int(source_index)
+                target_index = int(target_index)
+                if target_index < 0 or target_index >= len(gt_instances[batch_index]) or source_index >= queries:
+                    continue
+                source = int(gt_instances[batch_index].label_sources[target_index].item()) if gt_instances[batch_index].has("label_sources") else 0
+                if source not in (0, 1, 2):
+                    continue
+                global_id = int(gt_instances[batch_index].labels[target_index].item())
+                match = (select_id == global_id).nonzero(as_tuple=False).flatten()
+                if not match.numel():
+                    raise ValueError("matched global ID %d is absent from select_id" % global_id)
+                column = int(match[0].item())
+                query_box = outputs_box = None
+                # The current loss call supplies the prediction boxes through
+                # the owning outputs object; a detached zero IoU is replaced
+                # by the real query/GT IoU in loss_labels below.
+                if source in (0, 1):
+                    target[batch_index, source_index, column] = 1.0
+                    gt_mask[batch_index, source_index, column] = True
+                    if gt_instances[batch_index].has("label_weights"):
+                        value = float(gt_instances[batch_index].label_weights[target_index].detach().item())
+                        gt_weights[batch_index, source_index, column] = max(0.0, min(1.0, value))
+                    matched_source[batch_index, source_index] = source
+                else:
+                    # A PL row is a positive for its own class only.  It is
+                    # never a universal negative for other active classes.
+                    target[batch_index, source_index, column] = 1.0
+                    pl_mask[batch_index, source_index, column] = True
+                    value = float(gt_instances[batch_index].label_weights[target_index].detach().item()) if gt_instances[batch_index].has("label_weights") else 1.0
+                    pl_weights[batch_index, source_index, column] = max(0.0, min(1.0, value))
+                    matched_source[batch_index, source_index] = source
+                    pl_counts[global_id] = pl_counts.get(global_id, 0) + 1
+            gt_counts.append(gt_count)
+        self._pending_gt_counts = gt_counts
+        self._pending_pl_counts = pl_counts
+        return ClassificationSupervision(target, gt_mask, gt_weights, pl_mask, pl_weights, matched_iou, trusted, matched_source)
+
+    def _complete_matched_supervision(self, supervision, outputs, gt_instances, indices, frame_metadata):
+        """Add detached IoU-gated reliable-GT mutex cells after matching."""
+        select_id = outputs["select_id"].to(outputs["pred_logits"].device)
+        for batch_index, (src_idx, tgt_idx) in enumerate(indices):
+            if batch_index >= len(frame_metadata) or not bool(frame_metadata[batch_index].get("annotation_valid", True)):
+                continue
+            instance = gt_instances[batch_index]
+            for source_index, target_index in zip(src_idx.tolist(), tgt_idx.tolist()):
+                source_index, target_index = int(source_index), int(target_index)
+                if target_index < 0 or target_index >= len(instance) or source_index >= outputs["pred_boxes"].shape[1]:
+                    continue
+                source = int(instance.label_sources[target_index].item()) if instance.has("label_sources") else 0
+                if source not in (0, 1):
+                    continue
+                global_id = int(instance.labels[target_index].item())
+                iou = self._pair_iou(outputs["pred_boxes"][batch_index, source_index], instance.boxes[target_index].to(outputs["pred_boxes"]))
+                supervision.matched_iou[batch_index, source_index] = iou.detach()
+                if float(iou.detach().item()) < self.pl_iou_min:
+                    continue
+                supervision.trusted_gt_queries[batch_index, source_index] = True
+                if self.class_registry is None:
+                    mutex_ids = [int(value) for value in select_id.tolist() if int(value) != global_id]
+                else:
+                    mutex_ids = self.class_registry.mutually_exclusive_ids(global_id, [int(value) for value in select_id.tolist()])
+                for mutex_id in mutex_ids:
+                    mutex_columns = (select_id == int(mutex_id)).nonzero(as_tuple=False).flatten()
+                    if mutex_columns.numel():
+                        supervision.gt_mask[batch_index, source_index, mutex_columns] = True
+                        supervision.gt_weights[batch_index, source_index, mutex_columns] = 1.0
+        return supervision
+
+    def _apply_ignore_mask(self, valid, target, boxes, frame_metadata):
+        if not frame_metadata:
+            return valid
+        boxes_xyxy = box_ops.box_cxcywh_to_xyxy(boxes.detach()).clamp(0, 1)
+        result = valid.clone()
+        for batch_index, meta in enumerate(frame_metadata):
+            image_size = meta.get("image_size", [1, 1])
+            ih, iw = float(image_size[0]), float(image_size[1])
+            for region in meta.get("ignore_regions", []):
+                values = region.get("bbox_xyxy", [])
+                if len(values) != 4 or iw <= 0 or ih <= 0:
+                    continue
+                region_box = torch.tensor([values[0] / iw, values[1] / ih, values[2] / iw, values[3] / ih], device=boxes.device)
+                lt = torch.maximum(boxes_xyxy[batch_index, :, :2], region_box[:2])
+                rb = torch.minimum(boxes_xyxy[batch_index, :, 2:], region_box[2:])
+                inter = (rb - lt).clamp(min=0)
+                inter = inter[:, 0] * inter[:, 1]
+                area = (boxes_xyxy[batch_index, :, 2] - boxes_xyxy[batch_index, :, 0]).clamp(min=0) * (boxes_xyxy[batch_index, :, 3] - boxes_xyxy[batch_index, :, 1]).clamp(min=0)
+                region_area = max(0.0, float(values[2] - values[0])) / iw * max(0.0, float(values[3] - values[1])) / ih
+                iou = inter / (area + region_area - inter).clamp(min=1e-6)
+                overlap = iou >= 0.5
+                # Ignore screens only negative GT cells.  Reliable GT/PL
+                # positives remain supervised when they fall in the region.
+                result[batch_index, overlap] &= target[batch_index, overlap] > 0
+        return result
+
+    def loss_labels(self, outputs, gt_instances, indices, num_boxes, log=False):
+        logits = outputs["pred_logits"]
+        metadata = [self._frame_metadata()] if logits.shape[0] == 1 else self.frame_metadata
+        supervision = self.build_classification_targets(logits, outputs["select_id"], gt_instances, indices, metadata, self.label_mode)
+        supervision = self._complete_matched_supervision(supervision, outputs, gt_instances, indices, metadata)
+        supervision.gt_mask = self._apply_ignore_mask(supervision.gt_mask, supervision.targets, outputs["pred_boxes"], metadata)
+        gt_loss = focal_binary_loss(logits, supervision.targets, supervision.gt_mask, supervision.gt_weights)
+        class_losses = []
+        class_counts = self._pending_pl_counts
+        for global_id, count in sorted(class_counts.items()):
+            column = (outputs["select_id"] == int(global_id)).nonzero(as_tuple=False).flatten()
+            if not column.numel() or count <= 0:
+                continue
+            class_losses.append(focal_binary_loss(
+                logits[:, :, column], supervision.targets[:, :, column], supervision.pl_mask[:, :, column], supervision.pl_weights[:, :, column]
+            ) / float(count))
+        pl_loss = torch.stack(class_losses).mean() if class_losses else logits.sum() * 0.0
+        frame = int(self._current_frame_idx)
+        self._normalizers[(frame, int(self._loss_layer_tag))] = {
+            "gt": float(sum(self._pending_gt_counts)),
+            "pl": 1.0 if class_losses else 0.0,
+        }
+        self.last_supervision_diagnostics = {
+            "gt_valid_objects": float(sum(self._pending_gt_counts)),
+            "pl_valid_classes": float(len(class_losses)),
+            "pl_valid_objects": float(sum(class_counts.values())),
+            "gt_trusted_queries": float(supervision.trusted_gt_queries.sum().item()),
+        }
+        return {
+            "loss_gt_ce": gt_loss * self.lambda_gt,
+            "loss_pl_ce": pl_loss * self.effective_pl_lambda(),
+        }
+
+    def loss_boxes(self, outputs, gt_instances, indices, num_boxes):
+        gt_bbox_values, gt_giou_values = [], []
+        pl_by_class = {}
+        pl_giou_by_class = {}
+        for batch_index, (src_idx, tgt_idx) in enumerate(indices):
+            instance = gt_instances[batch_index]
+            for source_index, target_index in zip(src_idx.tolist(), tgt_idx.tolist()):
+                source_index, target_index = int(source_index), int(target_index)
+                if target_index < 0 or target_index >= len(instance) or source_index >= outputs["pred_boxes"].shape[1]:
+                    continue
+                if instance.has("obj_ids") and int(instance.obj_ids[target_index].item()) < 0:
+                    continue
+                src_box = outputs["pred_boxes"][batch_index, source_index]
+                tgt_box = instance.boxes[target_index].to(src_box)
+                weight = float(instance.label_weights[target_index].item()) if instance.has("label_weights") else 1.0
+                source = int(instance.label_sources[target_index].item()) if instance.has("label_sources") else 0
+                bbox_value = F.l1_loss(src_box, tgt_box, reduction="sum") * weight
+                giou_value = 1.0 - torch.diag(box_ops.generalized_box_iou(
+                    box_ops.box_cxcywh_to_xyxy(src_box[None]), box_ops.box_cxcywh_to_xyxy(tgt_box[None])))[0]
+                giou_value = giou_value * weight
+                if source in (0, 1):
+                    gt_bbox_values.append(bbox_value)
+                    gt_giou_values.append(giou_value)
+                elif source == 2:
+                    gid = int(instance.labels[target_index].item())
+                    pl_by_class.setdefault(gid, []).append(bbox_value)
+                    pl_giou_by_class.setdefault(gid, []).append(giou_value)
+        reference = outputs["pred_boxes"].sum() * 0.0
+        gt_bbox = torch.stack(gt_bbox_values).sum() if gt_bbox_values else reference
+        gt_giou = torch.stack(gt_giou_values).sum() if gt_giou_values else reference
+        pl_bbox = torch.stack([torch.stack(values).sum() / float(len(values)) for values in pl_by_class.values()]).mean() if pl_by_class else reference
+        pl_giou = torch.stack([torch.stack(values).sum() / float(len(values)) for values in pl_giou_by_class.values()]).mean() if pl_giou_by_class else reference
+        self._normalizers.setdefault((int(self._current_frame_idx), int(self._loss_layer_tag)), {
+            "gt": float(len(gt_bbox_values)), "pl": 1.0 if pl_by_class else 0.0,
+        })
+        return {
+            "loss_gt_bbox": gt_bbox * self.lambda_gt,
+            "loss_gt_giou": gt_giou * self.lambda_gt,
+            "loss_pl_bbox": pl_bbox * self.effective_pl_lambda(),
+            "loss_pl_giou": pl_giou * self.effective_pl_lambda(),
+        }
+
+    def forward(self, outputs):
+        losses = outputs.pop("losses_dict")
+        loss_avg = {}
+        for loss_name, value in losses.items():
+            parts = loss_name.split("_")
+            frame = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            layer = int(parts[2][3:]) + 1 if len(parts) > 2 and parts[2].startswith("aux") else 0
+            normalizers = self._normalizers.get((frame, layer), {"gt": 1.0, "pl": 1.0})
+            if "loss_gt_" in loss_name or loss_name.endswith("loss_align"):
+                denominator = normalizers.get("gt", 0.0)
+            elif "loss_pl_" in loss_name:
+                denominator = normalizers.get("pl", 0.0)
+            elif "loss_motion" in loss_name:
+                denominator = float(max(1, self.motion_pairs))
+            else:
+                denominator = 1.0
+            loss_avg[loss_name] = value / float(denominator) if denominator > 0 else value * 0.0
         return loss_avg
 
 
@@ -732,6 +1068,13 @@ class OVTR(nn.Module):
                     motion_max_dt=2.0,
                     inference_dedup_enabled=True,
                     duplicate_iou=0.9,
+                    birth_threshold=None,
+                    keep_threshold=None,
+                    export_threshold=None,
+                    duplicate_feature_cos=0.95,
+                    dedup_new_new=True,
+                    dedup_new_track=True,
+                    merge_existing_ids=False,
                  ):
         """ Initializes the model.
         Parameters:
@@ -768,6 +1111,10 @@ class OVTR(nn.Module):
         self.motion_training_step = 0
         self.inference_dedup_enabled = bool(inference_dedup_enabled)
         self.duplicate_iou = float(duplicate_iou)
+        self.duplicate_feature_cos = float(duplicate_feature_cos)
+        self.dedup_new_new = bool(dedup_new_new)
+        self.dedup_new_track = bool(dedup_new_track)
+        self.merge_existing_ids = bool(merge_existing_ids)
         self.runtime_stats = {
             "input_detection_queries": 0,
             "active_track_count": 0,
@@ -777,6 +1124,9 @@ class OVTR(nn.Module):
             "track_capacity_hits": 0,
             "invalid_dt_count": 0,
             "motion_advance_count": 0,
+            "birth_count": 0,
+            "keep_count": 0,
+            "export_count": 0,
         }
         self.patch2query = nn.Linear(512, 256)
         self.all_ids = torch.tensor(range(self.text_embeddings.shape[-1]))
@@ -876,6 +1226,9 @@ class OVTR(nn.Module):
             filter_score_thresh=_scalar(filter_score_thresh, 0.6),
             miss_tolerance=_scalar(miss_tolerance, 5),
             maximum_quantity=self.continual_cfg.get("maximum_quantity", 50),
+            birth_threshold=birth_threshold,
+            keep_threshold=keep_threshold,
+            export_threshold=export_threshold,
         )
         self.ious_thresh = float(self.continual_cfg.get("ious_thresh", 0.3))
 
@@ -903,6 +1256,9 @@ class OVTR(nn.Module):
         track_instances.pred_boxes = torch.zeros((num_queries, 4), dtype=torch.float, device=device)
         track_instances.pred_logits = torch.zeros((num_queries, cls_pad_len), dtype=torch.float, device=device)
         track_instances.suppressed_this_frame = torch.zeros((num_queries,), dtype=torch.bool, device=device)
+        track_instances.observed_this_frame = torch.zeros((num_queries,), dtype=torch.bool, device=device)
+        track_instances.export_valid = torch.zeros((num_queries,), dtype=torch.bool, device=device)
+        track_instances.export_scores = torch.zeros((num_queries,), dtype=torch.float, device=device)
         track_instances.last_timestamp_s = torch.full((num_queries,), float("nan"), dtype=torch.float32, device=device)
         track_instances.motion_valid = torch.zeros((num_queries,), dtype=torch.bool, device=device)
         if self.motion_mode != "none":
@@ -915,6 +1271,8 @@ class OVTR(nn.Module):
 
     def set_training_step(self, step: int):
         self.motion_training_step = int(step)
+        if hasattr(self.criterion, "set_training_step"):
+            self.criterion.set_training_step(int(step))
 
     def _advance_motion_references(self, track_instances, current_timestamp_s):
         """Apply a detached velocity once before the current transformer call."""
@@ -1137,7 +1495,13 @@ class OVTR(nn.Module):
             if self.inference_dedup_enabled:
                 track_instances, dedup_stats = protect_track_preds(
                     track_instances, num_queries=self.num_queries,
+                    birth_threshold=self.track_base.birth_threshold,
+                    keep_threshold=self.track_base.keep_threshold,
                     duplicate_iou=self.duplicate_iou,
+                    duplicate_feature_cos=self.duplicate_feature_cos,
+                    dedup_new_new=self.dedup_new_new,
+                    dedup_new_track=self.dedup_new_track,
+                    merge_existing_ids=self.merge_existing_ids,
                 )
                 self.runtime_stats["suppressed_duplicate_count"] += int(dedup_stats.get("suppressed", 0))
             # each track will be assigned an unique global id by the track base.
@@ -1147,6 +1511,11 @@ class OVTR(nn.Module):
             track_instances = self.track_base.update(track_instances, _track_discard, is_repeat=is_repeat)
             self.runtime_stats["new_id_count"] += int(self.track_base.max_obj_id - old_max_obj_id)
             self.runtime_stats["active_track_count"] += int((track_instances.obj_idxes >= 0).sum().item())
+            self.runtime_stats["birth_count"] += int(self.track_base.max_obj_id - old_max_obj_id)
+            if track_instances.has("observed_this_frame"):
+                self.runtime_stats["keep_count"] += int(track_instances.observed_this_frame.sum().item())
+            if track_instances.has("export_valid"):
+                self.runtime_stats["export_count"] += int(track_instances.export_valid.sum().item())
             if len(track_instances) >= self.track_base.maximum_quantity:
                 self.runtime_stats["track_capacity_hits"] += 1
 
@@ -1155,7 +1524,9 @@ class OVTR(nn.Module):
             track_instances.last_timestamp_s = torch.full_like(track_instances.last_timestamp_s, timestamp)
             if track_instances.has("motion_valid"):
                 track_instances.motion_valid = track_instances.obj_idxes >= 0
-        if track_instances.has("suppressed_this_frame"):
+        if track_instances.has("export_valid"):
+            self.runtime_stats["output_box_count"] += int(track_instances.export_valid.sum().item())
+        elif track_instances.has("suppressed_this_frame"):
             self.runtime_stats["output_box_count"] += int(((track_instances.obj_idxes >= 0) & (~track_instances.suppressed_this_frame)).sum().item())
 
         tmp = {}
@@ -1174,16 +1545,25 @@ class OVTR(nn.Module):
         out_logits = track_instances.pred_logits
 
         prob = out_logits.sigmoid()
-        scores, labels = prob.max(-1)
-
-        track_instances.scores = scores
+        max_scores, labels = prob.max(-1)
         cur_cls_idxes = select_id[labels]
         # track_instances.keep_cls = torch.eq(cur_cls_idxes, track_instances.cls_idxes)
 
         if is_first:
             track_instances.cls_idxes = cur_cls_idxes
         else:
-            track_instances.cls_idxes[scores >= self.track_base.filter_score_thresh] = cur_cls_idxes[scores >= self.track_base.filter_score_thresh]
+            accepted = max_scores >= self.track_base.keep_threshold
+            track_instances.cls_idxes[accepted] = cur_cls_idxes[accepted]
+        # The runtime score is always the score of the actually assigned
+        # global semantic class, never an unrelated winning select column.
+        assigned_columns = []
+        for global_id in track_instances.cls_idxes.tolist():
+            matches = (select_id == int(global_id)).nonzero(as_tuple=False).flatten()
+            assigned_columns.append(int(matches[0].item()) if matches.numel() else 0)
+        assigned_columns = torch.as_tensor(assigned_columns, dtype=torch.long, device=prob.device)
+        track_instances.assigned_column = assigned_columns
+        track_instances.scores = prob[torch.arange(len(prob), device=prob.device), assigned_columns]
+        track_instances.export_scores = track_instances.scores.clone()
         return track_instances
 
     @torch.no_grad()
@@ -1247,7 +1627,9 @@ class OVTR(nn.Module):
         for i in range(len(exported)):
             if int(exported.obj_idxes[i]) < 0:
                 continue
-            if exported.has("suppressed_this_frame") and bool(exported.suppressed_this_frame[i]):
+            if exported.has("export_valid") and not bool(exported.export_valid[i].item()):
+                continue
+            if exported.has("suppressed_this_frame") and bool(exported.suppressed_this_frame[i].item()):
                 continue
             global_id = int(exported.cls_idxes[i]) if exported.has("cls_idxes") else int(exported.labels[i])
             prediction_record["predictions"].append({
@@ -1267,6 +1649,7 @@ class OVTR(nn.Module):
         outputs = {
             'pred_logits': [],
             'pred_boxes': [],
+            'select_id': [],
             'track_instances': []
         }
         track_instances = self._generate_empty_tracks()
@@ -1341,6 +1724,7 @@ class OVTR(nn.Module):
             track_instances = frame_res['track_instances']
             outputs['pred_logits'].append(frame_res['pred_logits'])
             outputs['pred_boxes'].append(frame_res['pred_boxes'])
+            outputs['select_id'].append(frame_res['select_id'])
             outputs['track_instances'].append(frame_res['track_instances_pre'])
 
         outputs['losses_dict'] = self.criterion.losses_dict
@@ -1373,9 +1757,12 @@ def build(args, cfg):
     weight_dict = {}
 
     for i in range(0, num_frames_per_batch):
-        weight_dict.update({"frame_{}_loss_ce".format(i): args.cls_loss_coef,
-                            'frame_{}_loss_bbox'.format(i): args.bbox_loss_coef,
-                            'frame_{}_loss_giou'.format(i): args.giou_loss_coef,
+        weight_dict.update({"frame_{}_loss_gt_ce".format(i): args.cls_loss_coef,
+                            "frame_{}_loss_pl_ce".format(i): args.cls_loss_coef,
+                            'frame_{}_loss_gt_bbox'.format(i): args.bbox_loss_coef,
+                            'frame_{}_loss_pl_bbox'.format(i): args.bbox_loss_coef,
+                            'frame_{}_loss_gt_giou'.format(i): args.giou_loss_coef,
+                            'frame_{}_loss_pl_giou'.format(i): args.giou_loss_coef,
                             })
         if alignment_enabled:
             weight_dict['frame_{}_loss_align'.format(i)] = args.align_loss_coef
@@ -1385,9 +1772,12 @@ def build(args, cfg):
     if args.aux_loss:
         for i in range(0, num_frames_per_batch):
             for j in range(cfg.dec_layers - 1):
-                weight_dict.update({"frame_{}_aux{}_loss_ce".format(i, j): args.cls_loss_coef,
-                                    'frame_{}_aux{}_loss_bbox'.format(i, j): args.bbox_loss_coef,
-                                    'frame_{}_aux{}_loss_giou'.format(i, j): args.giou_loss_coef,
+                weight_dict.update({"frame_{}_aux{}_loss_gt_ce".format(i, j): args.cls_loss_coef,
+                                    "frame_{}_aux{}_loss_pl_ce".format(i, j): args.cls_loss_coef,
+                                    'frame_{}_aux{}_loss_gt_bbox'.format(i, j): args.bbox_loss_coef,
+                                    'frame_{}_aux{}_loss_pl_bbox'.format(i, j): args.bbox_loss_coef,
+                                    'frame_{}_aux{}_loss_gt_giou'.format(i, j): args.giou_loss_coef,
+                                    'frame_{}_aux{}_loss_pl_giou'.format(i, j): args.giou_loss_coef,
                                     })
                 if alignment_enabled:
                     weight_dict['frame_{}_aux{}_loss_align'.format(i, j)] = args.align_loss_coef
@@ -1404,6 +1794,12 @@ def build(args, cfg):
                                 num_queries=cfg.num_queries,
                                 label_mode=getattr(cfg, 'cmot_label_mode', 'complete'),
                                 motion_mode=motion_mode,
+                                class_registry=getattr(cfg, 'cmot_class_registry', None),
+                                protocol_role=getattr(cfg, 'cmot_protocol_role', 'cil'),
+                                pl_iou_min=float(getattr(cfg, 'cmot_pl_iou_min', 0.5)),
+                                lambda_gt=float(getattr(cfg, 'cmot_lambda_gt', 1.0)),
+                                lambda_pl=float(getattr(cfg, 'cmot_lambda_pl', 0.25)),
+                                pl_warmup_steps=int(getattr(cfg, 'cmot_pl_warmup_steps', 100)),
                                 )
     criterion.to(device)
 
@@ -1436,5 +1832,12 @@ def build(args, cfg):
         motion_max_dt=float(getattr(cfg, 'cmot_motion_max_dt', continual_cfg.get('max_dt', 2.0))),
         inference_dedup_enabled=bool(getattr(cfg, 'cmot_inference_dedup_enabled', True)),
         duplicate_iou=float(getattr(cfg, 'cmot_duplicate_iou', continual_cfg.get('duplicate_iou', 0.9))),
+        birth_threshold=float(getattr(cfg, 'cmot_birth_threshold', continual_cfg.get('birth_threshold', 0.5))),
+        keep_threshold=float(getattr(cfg, 'cmot_keep_threshold', continual_cfg.get('keep_threshold', 0.2))),
+        export_threshold=float(getattr(cfg, 'cmot_export_threshold', continual_cfg.get('export_threshold', 0.5))),
+        duplicate_feature_cos=float(getattr(cfg, 'cmot_duplicate_feature_cos', 0.95)),
+        dedup_new_new=bool(getattr(cfg, 'cmot_dedup_new_new', True)),
+        dedup_new_track=bool(getattr(cfg, 'cmot_dedup_new_track', True)),
+        merge_existing_ids=bool(getattr(cfg, 'cmot_merge_existing_ids', False)),
     )
     return model, criterion

@@ -10,9 +10,9 @@ from .schema import SemanticClass, StageSpec
 DEFAULT_CLASSES = {
     # IDs are the zero-based rows in ovtr/util/list_LVIS.py and the local
     # 1203-row semantic banks.  They are deliberately not TAO category IDs.
-    "car": SemanticClass("car", 206, 206, ("car_(automobile)", "automobile")),
-    "pedestrian": SemanticClass("pedestrian", 792, 792, ("person", "person.n.01", "baby")),
-    "truck": SemanticClass("truck", 1122, 1122, ("truck",)),
+    "car": SemanticClass("car", 206, 206, ("car_(automobile)", "automobile"), "bdd_object_kind"),
+    "pedestrian": SemanticClass("pedestrian", 792, 792, ("person", "person.n.01", "baby"), "bdd_object_kind"),
+    "truck": SemanticClass("truck", 1122, 1122, ("truck",), "bdd_object_kind"),
 }
 
 
@@ -80,6 +80,32 @@ class ClassRegistry:
     def column_to_global(self, column_id: int) -> int:
         ids = self.active_global_ids()
         return int(ids[int(column_id)])
+
+    def mutually_exclusive_ids(self, global_id: int, active_ids: Sequence[int]) -> Tuple[int, ...]:
+        """Return active global IDs in the target's exclusive category group."""
+        target = next((c for c in self.classes.values() if c.global_semantic_id == int(global_id)), None)
+        if target is None:
+            raise KeyError(global_id)
+        result = []
+        known = {c.global_semantic_id: c for c in self.classes.values()}
+        for value in active_ids:
+            candidate_id = int(value)
+            if candidate_id == int(global_id):
+                continue
+            candidate = known.get(candidate_id)
+            if candidate is None:
+                raise KeyError(candidate_id)
+            if target.exclusive_group and candidate.exclusive_group == target.exclusive_group:
+                result.append(candidate_id)
+        return tuple(result)
+
+    def columns_for_ids(self, select_id: Sequence[int], global_ids: Sequence[int]) -> Tuple[int, ...]:
+        """Map global semantic IDs to columns of an explicit select_id list."""
+        columns = {int(global_id): column for column, global_id in enumerate(select_id)}
+        missing = [int(global_id) for global_id in global_ids if int(global_id) not in columns]
+        if missing:
+            raise KeyError("global IDs are not in select_id: %s" % missing)
+        return tuple(columns[int(global_id)] for global_id in global_ids)
 
     def global_id_for_dataset(self, source: str, dataset_category_id: int) -> int:
         name = self.dataset_category_maps[source][int(dataset_category_id)]

@@ -2,7 +2,7 @@
 
 import hashlib
 import random
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Sequence
 
 import torch
@@ -27,10 +27,34 @@ class BalancedClipSampler(torch.utils.data.Sampler):
                     i for i, item in enumerate(dataset.clip_index)
                     if item.get("stream", "current") == stream and (bool(item.get("focus_global_ids")) if positive else not bool(item.get("focus_global_ids")))
                 ]
-                # Stable independent data RNG; model construction cannot alter
-                # this order and all method variants receive the same plan.
-                candidates.sort(key=lambda i: hashlib.sha256(("%s|%s|%s|%s" % (self.seed, self.stage_id, stream, i)).encode("utf-8")).hexdigest())
-                self._orders[(stream, positive)] = candidates
+                # Interleave class -> source-video -> clip strata.  The
+                # resulting plan uses only legal GT focus fields, so adding or
+                # removing PL cannot change the schedule.
+                groups = defaultdict(list)
+                for index in candidates:
+                    item = dataset.clip_index[index]
+                    focus = tuple(int(v) for v in item.get("focus_global_ids", []))
+                    source = str(item.get("source_video_uid", item.get("source_video_id", "unknown")))
+                    keys = [(int(value), source) for value in focus] or [("unknown", source)]
+                    for key in keys:
+                        groups[key].append(index)
+                for key, values in groups.items():
+                    values.sort(key=lambda i: hashlib.sha256(("%s|%s|%s|%s|%s" % (self.seed, self.stage_id, stream, key, i)).encode("utf-8")).hexdigest())
+                strata = [deque(values) for _, values in sorted(groups.items(), key=lambda value: repr(value[0])) if values]
+                interleaved = []
+                seen = set()
+                while strata:
+                    next_strata = []
+                    for values in strata:
+                        if values:
+                            candidate = values.popleft()
+                            if candidate not in seen:
+                                interleaved.append(candidate)
+                                seen.add(candidate)
+                        if values:
+                            next_strata.append(values)
+                    strata = next_strata
+                self._orders[(stream, positive)] = interleaved
 
     def __len__(self):
         return max(0, self.total_steps - self.start_step)
@@ -56,7 +80,9 @@ class BalancedClipSampler(torch.utils.data.Sampler):
             positive = (absolute_step % 5) != 4
             value = self._next(stream, positive)
             if value is None:
-                value = self._next("current", False) or self._next("current", True)
+                value = self._next("current", False)
+                if value is None:
+                    value = self._next("current", True)
             if value is None:
                 raise RuntimeError("balanced sampler has no usable clip")
             yield int(value)
@@ -80,7 +106,10 @@ class BalancedClipSampler(torch.utils.data.Sampler):
 
     def plan_hash(self) -> str:
         cursors = dict(self._cursors)
+        start_step = self.start_step
+        self.start_step = 0
         values = list(iter(self))
+        self.start_step = start_step
         self._cursors.clear()
         self._cursors.update(cursors)
         return hashlib.sha256(repr(values).encode("utf-8")).hexdigest()

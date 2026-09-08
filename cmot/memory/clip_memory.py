@@ -89,6 +89,8 @@ class ClipReplayMemory:
                     media_paths[media["path"]] = int(media["bytes"])
                     frame_payload.append({
                         "frame_key": frame["frame_key"],
+                        "frame_uid": str(frame.get("frame_uid") or frame["frame_key"]),
+                        "source_video_uid": str(frame.get("source_video_uid") or video.get("source_video_uid") or video.get("source_video_id", video["video_id"])),
                         "frame_index": int(frame["frame_index"]),
                         "file_name": frame["file_name"],
                         "timestamp_s": frame.get("timestamp_s"),
@@ -107,6 +109,7 @@ class ClipReplayMemory:
                     "clip_id": clip_id,
                     "source_stage": str(stage_id),
                     "source_video_id": str(video.get("source_video_id", video["video_id"])),
+                    "source_video_uid": str(video.get("source_video_uid") or video.get("source_video_id") or video["video_id"]),
                     "video_id": str(video["video_id"]),
                     "image_root": video.get("image_root"),
                     "split": video.get("split", "train"),
@@ -176,6 +179,8 @@ class ClipReplayMemory:
             frames = []
             for frame in clip.get("frames", []):
                 current = dict(frame)
+                current["source_video_uid"] = str(current.get("source_video_uid") or clip.get("source_video_uid") or clip.get("source_video_id"))
+                current["frame_uid"] = str(current.get("frame_uid") or current["frame_key"])
                 current["annotations"] = []
                 for ann in frame.get("annotations", []):
                     if int(ann["global_semantic_id"]) not in active:
@@ -199,6 +204,7 @@ class ClipReplayMemory:
                 "video_id": replay_video_id,
                 "replay_clip_id": clip_id,
                 "source_video_id": clip.get("source_video_id", clip.get("video_id")),
+                "source_video_uid": clip.get("source_video_uid", clip.get("source_video_id", clip.get("video_id"))),
                 "split": clip.get("split", split),
                 "dataset": "BDD100K MOT",
                 "image_root": clip.get("image_root"),

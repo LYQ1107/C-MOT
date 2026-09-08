@@ -20,8 +20,27 @@ def _read(path: Path) -> dict:
         return json.load(handle)
 
 
+def _validate_categories(source: dict) -> None:
+    categories = source.get("categories")
+    if not categories:
+        return
+    observed = {}
+    for category in categories:
+        category_id = int(category["id"])
+        name = str(category.get("name", "")).strip().lower()
+        if category_id in BDD_CATEGORY_MAP:
+            expected = BDD_CATEGORY_MAP[category_id]
+            aliases = {expected, "person" if expected == "pedestrian" else expected}
+            if name not in aliases:
+                raise ValueError("BDD category %s is %r, expected %s" % (category_id, name, expected))
+            observed[category_id] = expected
+    if set(observed) != set(BDD_CATEGORY_MAP):
+        raise ValueError("BDD category table does not contain the required 1/2/3 mapping: %s" % observed)
+
+
 def _convert_file(annotation_path: Path, image_root: Path, split: str, domain: str) -> Tuple[List[VideoRecord], List[str], Counter]:
     source = _read(annotation_path)
+    _validate_categories(source)
     videos = {int(v["id"]): v for v in source.get("videos", [])}
     images_by_id = {int(i["id"]): i for i in source.get("images", [])}
     images_by_video: Dict[int, List[dict]] = defaultdict(list)
@@ -38,6 +57,7 @@ def _convert_file(annotation_path: Path, image_root: Path, split: str, domain: s
         source_video = videos[source_video_id]
         source_name = str(source_video["name"])
         video_id = "bdd_%s_%s" % (domain, source_name)
+        source_video_uid = "bdd100k_mot:v1:%s:%s" % (domain, source_name)
         frame_records = []
         for image in sorted(images_by_video.get(source_video_id, []), key=lambda x: (int(x.get("frame_id", 0)), int(x["id"]))):
             file_name = str(image["file_name"])
@@ -50,14 +70,19 @@ def _convert_file(annotation_path: Path, image_root: Path, split: str, domain: s
                     continue
                 category_id = int(ann["category_id"])
                 class_name = BDD_CATEGORY_MAP[category_id]
+                if "instance_id" not in ann:
+                    raise ValueError("BDD annotation %s has no instance_id; refusing annotation-id fallback" % ann.get("id"))
+                track_id = int(ann["instance_id"])
                 annotations.append(AnnotationRecord(
-                    track_id=int(ann["instance_id"]),
+                    track_id=track_id,
                     dataset_category_id=category_id,
                     global_semantic_id=GLOBAL_IDS[class_name],
                     bbox_xyxy=[x, y, x + w, y + h],
                     label_source="gt",
                     label_status="reliable" if not int(ann.get("iscrowd", 0)) else "ignore",
                     iscrowd=int(ann.get("iscrowd", 0)),
+                    acquired_stage="source_gt",
+                    track_uid="%s:track:%s" % (source_video_uid, track_id),
                 ))
                 counts[class_name] += 1
             frame_index = int(image.get("frame_id", 0))
@@ -73,7 +98,9 @@ def _convert_file(annotation_path: Path, image_root: Path, split: str, domain: s
                     supervised_global_ids=list(GLOBAL_IDS.values()),
                     exhaustive_global_ids=list(GLOBAL_IDS.values()),
                     annotation_valid=True,
-                    source_image_id=int(image["id"]),
+                source_image_id=int(image["id"]),
+                source_video_uid=source_video_uid,
+                frame_uid="%s:frame:%06d" % (source_video_uid, frame_index),
             ))
         if frame_records:
             result.append(VideoRecord(
@@ -86,6 +113,7 @@ def _convert_file(annotation_path: Path, image_root: Path, split: str, domain: s
                 source_video_name=source_name,
                 dataset="BDD100K MOT",
                 image_root="BDD100K_%s" % domain,
+                source_video_uid=source_video_uid,
             ))
     return result, missing, counts
 

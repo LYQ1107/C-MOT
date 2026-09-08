@@ -201,6 +201,34 @@ def evaluate_trackeval(
         })
         result, messages = evaluator.evaluate([dataset], [HOTA(), CLEAR(), Identity()])
         combined = result["BDD100K"]["cmot"]["COMBINED_SEQ"]
+        def _metric_row(hota_data, clear_data, identity_data, count_data):
+            def _array(name, cast=float):
+                value = hota_data.get(name)
+                if value is None:
+                    return None
+                return [cast(item) for item in value.tolist()]
+            return {
+                # HOTA(0) is retained under an explicit name; headline HOTA
+                # is the mandated mean over all 19 thresholds.
+                "HOTA_mean": float(hota_data["HOTA"].mean()),
+                "hota_at_005": float(hota_data["HOTA(0)"]),
+                "DetA_mean": float(hota_data["DetA"].mean()),
+                "AssA_mean": float(hota_data["AssA"].mean()),
+                "HOTA_thresholds": _array("HOTA"),
+                "DetA_thresholds": _array("DetA"),
+                "AssA_thresholds": _array("AssA"),
+                "TP": _array("HOTA_TP", int),
+                "FP": _array("HOTA_FP", int),
+                "FN": _array("HOTA_FN", int),
+                "IDSW": int(clear_data["IDSW"]),
+                "IDTP": int(identity_data["IDTP"]),
+                "IDFP": int(identity_data["IDFP"]),
+                "IDFN": int(identity_data["IDFN"]),
+                "MOTA": float(clear_data["MOTA"]),
+                "IDF1": float(identity_data["IDF1"]),
+                "gt_dets": int(count_data["GT_Dets"]),
+                "pred_dets": int(count_data["Dets"]),
+            }
         rows = {}
         for global_id, class_name in GLOBAL_TO_NAME.items():
             if class_name not in active_names:
@@ -210,17 +238,7 @@ def evaluate_trackeval(
             clear_data = per_class["CLEAR"]
             identity_data = per_class["Identity"]
             count_data = per_class["Count"]
-            rows[str(global_id)] = {
-                "class_name": class_name,
-                "hota": float(hota_data["HOTA(0)"]),
-                "hota_mean": float(hota_data["HOTA"].mean()),
-                "deta": float(hota_data["DetA"][0]),
-                "assa": float(hota_data["AssA"][0]),
-                "mota": float(clear_data["MOTA"]),
-                "idf1": float(identity_data["IDF1"]),
-                "gt_dets": int(count_data["GT_Dets"]),
-                "pred_dets": int(count_data["Dets"]),
-            }
+            rows[str(global_id)] = {"class_name": class_name, **_metric_row(hota_data, clear_data, identity_data, count_data)}
         official_det = combined["cls_comb_det_av"]
         official_class = combined["cls_comb_cls_av"]
         def _combined_row(source):
@@ -228,16 +246,7 @@ def evaluate_trackeval(
             clear_data = source["CLEAR"]
             identity_data = source["Identity"]
             count_data = source["Count"]
-            return {
-                "hota": float(hota_data["HOTA(0)"]),
-                "hota_mean": float(hota_data["HOTA"].mean()),
-                "deta": float(hota_data["DetA"][0]),
-                "assa": float(hota_data["AssA"][0]),
-                "mota": float(clear_data["MOTA"]),
-                "idf1": float(identity_data["IDF1"]),
-                "gt_dets": int(count_data["GT_Dets"]),
-                "pred_dets": int(count_data["Dets"]),
-            }
+            return _metric_row(hota_data, clear_data, identity_data, count_data)
         binding = dict(expected_binding or {})
         for key in (
             "checkpoint_sha256",
@@ -248,6 +257,14 @@ def evaluate_trackeval(
             if key in files["prediction_metadata"]:
                 binding[key] = files["prediction_metadata"][key]
         binding.setdefault("prediction_sha256", sha256_file(prediction_path))
+        binding_mismatches = {}
+        for key, expected in (expected_binding or {}).items():
+            actual = binding.get(key)
+            if actual != expected:
+                binding_mismatches[str(key)] = {"expected": expected, "actual": actual}
+        if binding_mismatches:
+            raise ValueError("prediction/checkpoint/view binding mismatch: %s" % binding_mismatches)
+
         output = {
             "status": "OK",
             "evaluator": "TrackEval BDD100K + HOTA/CLEAR/Identity",
@@ -265,6 +282,7 @@ def evaluate_trackeval(
                 **_combined_row(official_class),
             },
             "checkpoint_binding": binding,
+            "binding_verified": True,
             "prediction_sha256": sha256_file(prediction_path),
         }
     finally:

@@ -20,8 +20,27 @@ def _load_json(path: Path) -> dict:
         return json.load(handle)
 
 
+def _validate_categories(source: dict) -> None:
+    categories = source.get("categories")
+    if not categories:
+        return
+    observed = {}
+    for category in categories:
+        category_id = int(category["id"])
+        if category_id in TAO_CATEGORY_MAP:
+            name = str(category.get("name", "")).strip().lower()
+            expected = TAO_CATEGORY_MAP[category_id]
+            aliases = {expected, "person" if expected == "pedestrian" else expected}
+            if name not in aliases and not (expected == "pedestrian" and name == "baby"):
+                raise ValueError("TAO category %s is %r, expected %s" % (category_id, name, expected))
+            observed[category_id] = expected
+    if set(observed) != set(TAO_CATEGORY_MAP):
+        raise ValueError("TAO category table does not contain the required sparse mapping: %s" % observed)
+
+
 def _convert_split(annotation_path: Path, split: str, frames_root: Path) -> tuple:
     source = _load_json(annotation_path)
+    _validate_categories(source)
     videos_by_id = {
         int(v["id"]): v
         for v in source.get("videos", [])
@@ -48,6 +67,7 @@ def _convert_split(annotation_path: Path, split: str, frames_root: Path) -> tupl
         video = videos_by_id[source_video_id]
         video_name = str(video["name"])
         video_id = "%s_bdd_%04d" % (split, source_video_id)
+        source_video_uid = "tao_amodal:v1:%s:%s" % (split, source_video_id)
         frames: List[FrameRecord] = []
         for image in sorted(images_by_video[source_video_id], key=lambda x: (int(x.get("frame_index", 0)), int(x["id"]))):
             rel_file = str(image["file_name"])
@@ -62,15 +82,20 @@ def _convert_split(annotation_path: Path, split: str, frames_root: Path) -> tupl
                     continue
                 category_id = int(ann["category_id"])
                 name = TAO_CATEGORY_MAP[category_id]
+                if "track_id" not in ann:
+                    raise ValueError("TAO annotation %s has no track_id; refusing annotation-id fallback" % ann.get("id"))
+                track_id = int(ann["track_id"])
                 converted.append(
                     AnnotationRecord(
-                        track_id=int(ann.get("track_id", ann["id"])),
+                        track_id=track_id,
                         dataset_category_id=category_id,
                         global_semantic_id=GLOBAL_IDS[name],
                         bbox_xyxy=[x, y, x + w, y + h],
                         label_source="gt",
                         label_status="reliable" if not int(ann.get("iscrowd", 0)) else "ignore",
                         iscrowd=int(ann.get("iscrowd", 0)),
+                        acquired_stage="source_gt",
+                        track_uid="%s:track:%s" % (source_video_uid, track_id),
                     )
                 )
                 annotation_counts[name] += 1
@@ -88,6 +113,8 @@ def _convert_split(annotation_path: Path, split: str, frames_root: Path) -> tupl
                     exhaustive_global_ids=list(GLOBAL_IDS.values()),
                     annotation_valid=True,
                     source_image_id=int(image["id"]),
+                    source_video_uid=source_video_uid,
+                    frame_uid="%s:frame:%06d" % (source_video_uid, frame_index),
                 )
             )
         if frames:
@@ -102,6 +129,7 @@ def _convert_split(annotation_path: Path, split: str, frames_root: Path) -> tupl
                     source_video_name=video_name,
                     dataset="TAO-Amodal/BDD",
                     image_root="frames",
+                    source_video_uid=source_video_uid,
                 )
             )
     return videos, missing_images, annotation_counts

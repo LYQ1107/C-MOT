@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader
 
 from .manifest import canonical_json_hash, sha256_file, write_json
 from .ovtr_runtime import load_checkpoint, make_model
+from .losses.replay_distillation import ReplayAlignedDistillation
 
 
 def _move_batch(batch: dict, device: torch.device) -> dict:
@@ -139,6 +140,10 @@ def _exposure_update(exposure: dict, batch: dict) -> None:
     exposure["clips_by_stream"][stream] += 1
     exposure["clip_ids"].add(str(sample.get("clip_id", "")))
     exposure["video_ids"].update(str(meta.get("video_id", "")) for meta in batch.get("frame_metadata", []))
+    exposure.setdefault("source_video_uids", set()).update(
+        str(meta.get("source_video_uid", meta.get("source_video_id", "")))
+        for meta in batch.get("frame_metadata", [])
+    )
     for meta in batch.get("frame_metadata", []):
         exposure["frames_seen"] += 1
         exposure["frame_keys"].add(str(meta.get("frame_key", "")))
@@ -151,11 +156,12 @@ def _exposure_update(exposure: dict, batch: dict) -> None:
             gid = str(int(target.labels[index]))
             exposure["annotations_by_source"][source] += 1
             exposure["annotations_by_global_id"][gid] += 1
+            exposure.setdefault("annotations_by_source_class", Counter())[source + ":" + gid] += 1
 
 
 def _finalize_exposure(exposure: dict) -> dict:
     result = dict(exposure)
-    for key in ("clip_ids", "video_ids", "frame_keys"):
+    for key in ("clip_ids", "video_ids", "source_video_uids", "frame_keys"):
         result[key + "_unique"] = len(result.pop(key))
     result["steps_by_stream"] = dict(sorted(result["steps_by_stream"].items()))
     result["clips_by_stream"] = dict(sorted(result["clips_by_stream"].items()))
@@ -163,7 +169,39 @@ def _finalize_exposure(exposure: dict) -> dict:
     result["annotations_by_global_id"] = dict(
         sorted(result["annotations_by_global_id"].items(), key=lambda item: int(item[0]))
     )
+    result["annotations_by_source_class"] = dict(sorted(result.get("annotations_by_source_class", {}).items()))
     return result
+
+
+def _exposure_state(exposure: dict) -> dict:
+    """Make cumulative exposure resumable without serializing sets."""
+    return {
+        "frames_seen": int(exposure["frames_seen"]),
+        "steps_by_stream": dict(exposure["steps_by_stream"]),
+        "clips_by_stream": dict(exposure["clips_by_stream"]),
+        "clip_ids": sorted(exposure["clip_ids"]),
+        "video_ids": sorted(exposure["video_ids"]),
+        "source_video_uids": sorted(exposure.get("source_video_uids", set())),
+        "frame_keys": sorted(exposure["frame_keys"]),
+        "annotations_by_source": dict(exposure["annotations_by_source"]),
+        "annotations_by_global_id": dict(exposure["annotations_by_global_id"]),
+        "annotations_by_source_class": dict(exposure.get("annotations_by_source_class", Counter())),
+    }
+
+
+def _restore_exposure(state: Mapping[str, object]) -> dict:
+    return {
+        "frames_seen": int(state.get("frames_seen", 0)),
+        "steps_by_stream": Counter(state.get("steps_by_stream", {})),
+        "clips_by_stream": Counter(state.get("clips_by_stream", {})),
+        "clip_ids": set(str(v) for v in state.get("clip_ids", [])),
+        "video_ids": set(str(v) for v in state.get("video_ids", [])),
+        "source_video_uids": set(str(v) for v in state.get("source_video_uids", [])),
+        "frame_keys": set(str(v) for v in state.get("frame_keys", [])),
+        "annotations_by_source": Counter(state.get("annotations_by_source", {})),
+        "annotations_by_global_id": Counter(state.get("annotations_by_global_id", {})),
+        "annotations_by_source_class": Counter(state.get("annotations_by_source_class", {})),
+    }
 
 
 def train(
@@ -193,6 +231,9 @@ def train(
     init_mode: Optional[str] = None,
     replay_memory_version: Optional[str] = None,
     protocol_hash: Optional[str] = None,
+    teacher_checkpoint: Optional[str] = None,
+    teacher_active_global_ids: Sequence[int] = (206,),
+    teacher_resolved_config: Optional[Mapping[str, object]] = None,
 ) -> dict:
     resolved = dict(resolved_config or {})
     training_cfg = dict(resolved.get("training", {}))
@@ -223,6 +264,68 @@ def train(
         alignment=alignment,
         resolved_config=resolved or None,
     )
+
+    # KD is a frozen, separately loaded S0 teacher.  It is constructed only
+    # for the R-QPL-KD branch; its parameters never enter the student
+    # optimizer or autograd graph.
+    teacher_model = None
+    kd_module = None
+    if bool(resolved.get("enable_kd", False)):
+        if not teacher_checkpoint:
+            raise ValueError("KD run requires an explicitly bound teacher checkpoint")
+        teacher_cfg = dict(teacher_resolved_config or resolved)
+        teacher_stage = str(teacher_cfg.get("stage", "S0"))
+        teacher_cfg["stage"] = teacher_stage
+        teacher_cfg["method"] = str(teacher_cfg.get("method", "S0-v3"))
+        teacher_cfg["protocol_role"] = "cil"
+        teacher_cfg["active_global_ids"] = [int(v) for v in teacher_active_global_ids]
+        teacher_cfg["new_global_ids"] = [int(v) for v in teacher_active_global_ids]
+        teacher_cfg["old_global_ids"] = []
+        teacher_cfg["label_mode"] = "complete"
+        teacher_cfg["enable_pl"] = False
+        teacher_cfg["enable_kd"] = False
+        teacher_cfg["motion"] = dict(teacher_cfg.get("motion", {}))
+        teacher_cfg["motion"]["mode"] = "none"
+        teacher_cfg["motion"]["implementation"] = "none"
+        teacher_model, _, _, _, _ = make_model(
+            ovtr_root,
+            config_file,
+            text_embedding,
+            image_embedding,
+            teacher_active_global_ids,
+            device,
+            clip_len=clip_len,
+            motion_mode="none",
+            label_mode="complete",
+            alignment=alignment,
+            resolved_config=teacher_cfg,
+        )
+        load_checkpoint(
+            teacher_model,
+            teacher_checkpoint,
+            init_mode="resume",
+            expected_metadata={
+                "stage": teacher_stage,
+                "active_global_ids": [int(v) for v in teacher_active_global_ids],
+                "motion_mode": "none",
+            },
+        )
+        teacher_model.eval()
+        for parameter in teacher_model.parameters():
+            parameter.requires_grad_(False)
+        distill_cfg = dict(resolved.get("distillation", {}))
+        kd_module = ReplayAlignedDistillation(
+            temperature=float(distill_cfg.get("temperature", 2.0)),
+            iou_min=float(distill_cfg.get("iou_min", 0.5)),
+            score_min=float(distill_cfg.get("score_min", 0.5)),
+            lambda_kd=float(distill_cfg.get("lambda_kd", 0.25)),
+            warmup_steps=int(distill_cfg.get("warmup_steps", 100)),
+        )
+        kd_module.set_training_step(0)
+        # This is the one global auxiliary term allowed by the trainer.  It is
+        # still present in weight_dict so the optimizer audit cannot silently
+        # discard a newly introduced loss.
+        criterion.weight_dict["loss_kd"] = 1.0
     from .data.real_video_dataset import ContinualVideoDataset, mot_collate_fn
     from .data.sampling import BalancedClipSampler
 
@@ -287,20 +390,25 @@ def train(
     model.train()
     criterion.train()
     max_grad_norm = float(training_cfg.get("max_grad_norm", 0.1))
+    gradient_audit_every = max(1, int(training_cfg.get("gradient_audit_every", 100)))
+    audit_steps = {1, int(total_steps)} | set(range(gradient_audit_every, int(total_steps) + 1, gradient_audit_every))
     step_log = destination / "train_steps.jsonl"
     log_mode = "a" if resume and step_log.exists() else "w"
     started = time.time()
-    exposure = {
+    exposure = _restore_exposure(checkpoint_payload.get("exposure_state", {})) if checkpoint_payload else {
         "frames_seen": 0,
         "steps_by_stream": Counter(),
         "clips_by_stream": Counter(),
         "clip_ids": set(),
         "video_ids": set(),
+        "source_video_uids": set(),
         "frame_keys": set(),
         "annotations_by_source": Counter(),
         "annotations_by_global_id": Counter(),
+        "annotations_by_source_class": Counter(),
     }
     runtime_stats = Counter()
+    kd_aggregate = Counter(checkpoint_payload.get("kd_aggregate", {})) if checkpoint_payload else Counter()
     actual_steps = start_step
     with step_log.open(log_mode, encoding="utf-8") as log_handle:
         for step, raw_batch in enumerate(loader, start=start_step + 1):
@@ -310,17 +418,40 @@ def train(
             _exposure_update(exposure, batch)
             optimizer.zero_grad(set_to_none=True)
             model.set_training_step(step)
+            if kd_module is not None:
+                kd_module.set_training_step(step)
             outputs = model(batch)
             loss_dict = criterion(outputs)
             weighted_terms = []
             raw_terms = {}
             for name, value in loss_dict.items():
                 if name not in criterion.weight_dict:
-                    continue
+                    raise RuntimeError("loss %s is absent from criterion.weight_dict" % name)
                 if not _finite(value):
                     raise FloatingPointError("non-finite loss %s at step %d" % (name, step))
                 raw_terms[name] = float(value.detach().item())
                 weighted_terms.append(value * float(criterion.weight_dict[name]))
+            kd_diag = {
+                "replay_gt_objects": 0.0,
+                "valid_kd_objects": 0.0,
+                "kd_pairs": 0.0,
+                "effective_lambda": 0.0,
+            }
+            if kd_module is not None and str(batch.get("sample_metadata", {}).get("stream", "current")) == "replay":
+                with torch.no_grad():
+                    teacher_outputs = teacher_model(batch)
+                kd_loss, kd_diag = kd_module(
+                    outputs,
+                    teacher_outputs,
+                    batch["gt_instances"],
+                    old_global_ids=resolved.get("old_global_ids", []),
+                    student_select_ids=outputs.get("select_id"),
+                    teacher_select_ids=teacher_outputs.get("select_id"),
+                )
+                if not _finite(kd_loss):
+                    raise FloatingPointError("non-finite loss_kd at step %d" % step)
+                raw_terms["loss_kd"] = float(kd_loss.detach().item())
+                weighted_terms.append(kd_loss * float(criterion.weight_dict["loss_kd"]))
             if not weighted_terms:
                 raise RuntimeError("no weighted losses reached the optimizer")
             loss = sum(weighted_terms)
@@ -328,11 +459,13 @@ def train(
                 raise FloatingPointError("non-finite total loss at step %d" % step)
             loss.backward()
             gradient_norm = float(clip_grad_norm_(model.parameters(), max_grad_norm).item())
-            audit_before = _select_audit_parameters(model) if step in (1, int(total_steps)) else {}
+            audit_before = _select_audit_parameters(model) if step in audit_steps else {}
             optimizer.step()
             parameter_audit = _gradient_audit(model, audit_before) if audit_before else {}
             step_runtime = model.consume_runtime_stats() if hasattr(model, "consume_runtime_stats") else {}
             runtime_stats.update({key: int(value) for key, value in step_runtime.items()})
+            for key, value in kd_diag.items():
+                kd_aggregate[key] += float(value)
             actual_steps = step
             record = {
                 "step": step,
@@ -342,6 +475,7 @@ def train(
                 "losses": raw_terms,
                 "parameter_audit": parameter_audit,
                 "runtime_stats": step_runtime,
+                "kd": kd_diag,
                 "elapsed_s": round(time.time() - started, 3),
                 "device": os.environ.get("CUDA_VISIBLE_DEVICES", device),
                 "stream": raw_batch.get("sample_metadata", {}).get("stream", "current"),
@@ -351,10 +485,11 @@ def train(
 
     if actual_steps != int(total_steps):
         raise RuntimeError("training ended at step %d, expected %d" % (actual_steps, int(total_steps)))
+    exposure_state = _exposure_state(exposure)
     exposure = _finalize_exposure(exposure)
     motion_cfg = dict(resolved.get("motion", {}))
     metadata = {
-        "schema_version": "cmot.repair_v2.checkpoint",
+        "schema_version": "cmot.continual_v3.checkpoint",
         "experiment_id": experiment_id or destination.name,
         "stage": str(resolved.get("stage", destination.name)),
         "active_global_ids": list(active_global_ids),
@@ -370,6 +505,15 @@ def train(
         "sampler_plan_hash": sampler_plan_hash,
         "protocol_hash": protocol_hash,
         "replay_memory_version": replay_memory_version,
+        "teacher_checkpoint_sha256": None if not teacher_checkpoint else sha256_file(teacher_checkpoint),
+        "kd_enabled": bool(kd_module is not None),
+        "actual_modules": {
+            "model_class": model.__class__.__name__,
+            "criterion_class": criterion.__class__.__name__,
+            "motion_head_class": None if not hasattr(model, "motion_head") else model.motion_head.__class__.__name__,
+            "motion_mode": motion_mode,
+        },
+        "actual_loss_weights": {str(key): float(value) for key, value in sorted(criterion.weight_dict.items())},
     }
     checkpoint_path = destination / ("checkpoint_%03d.pt" % int(actual_steps))
     torch.save({
@@ -386,6 +530,8 @@ def train(
         "replay_view": None if not replay_view else Path(replay_view).name,
         "input_size": list(input_size),
         "sampler_state": sampler.state_dict(),
+        "exposure_state": exposure_state,
+        "kd_aggregate": dict(kd_aggregate),
         "rng_state": _capture_rng(),
     }, str(checkpoint_path))
     summary = {
@@ -417,6 +563,10 @@ def train(
         },
         "exposure": exposure,
         "runtime_stats": dict(sorted(runtime_stats.items())),
+        "kd_enabled": bool(kd_module is not None),
+        "kd_aggregate": dict(kd_aggregate),
+        "actual_modules": metadata.get("actual_modules", {}),
+        "actual_loss_weights": metadata.get("actual_loss_weights", {}),
         "step_log": step_log.name,
         "elapsed_s": round(time.time() - started, 3),
     }

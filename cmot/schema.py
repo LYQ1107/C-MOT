@@ -23,6 +23,7 @@ class SemanticClass:
     global_semantic_id: int
     text_row: int
     aliases: Tuple[str, ...] = ()
+    exclusive_group: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -30,6 +31,7 @@ class SemanticClass:
             "global_semantic_id": self.global_semantic_id,
             "text_row": self.text_row,
             "aliases": list(self.aliases),
+            "exclusive_group": self.exclusive_group,
         }
 
 
@@ -43,6 +45,11 @@ class AnnotationRecord:
     label_status: str = "reliable"
     score: Optional[float] = None
     iscrowd: int = 0
+    acquired_stage: str = ""
+    track_uid: str = ""
+    teacher_checkpoint_sha256: Optional[str] = None
+    pl_segment_id: Optional[str] = None
+    reliability: Optional[float] = None
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -54,6 +61,11 @@ class AnnotationRecord:
             "label_status": self.label_status,
             "score": None if self.score is None else float(self.score),
             "iscrowd": int(self.iscrowd),
+            "acquired_stage": self.acquired_stage,
+            "track_uid": self.track_uid,
+            "teacher_checkpoint_sha256": self.teacher_checkpoint_sha256,
+            "pl_segment_id": self.pl_segment_id,
+            "reliability": None if self.reliability is None else float(self.reliability),
         }
 
 
@@ -72,6 +84,8 @@ class FrameRecord:
     ignore_regions: List[dict] = field(default_factory=list)
     annotation_valid: bool = True
     source_image_id: Optional[int] = None
+    source_video_uid: str = ""
+    frame_uid: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -90,6 +104,8 @@ class FrameRecord:
             "ignore_regions": list(self.ignore_regions),
             "annotation_valid": bool(self.annotation_valid),
             "source_image_id": self.source_image_id,
+            "source_video_uid": self.source_video_uid,
+            "frame_uid": self.frame_uid or self.frame_key,
             "annotations": [a.as_dict() for a in self.annotations],
         }
 
@@ -105,6 +121,7 @@ class VideoRecord:
     source_video_name: Optional[str] = None
     dataset: str = "TAO-Amodal"
     image_root: Optional[str] = None
+    source_video_uid: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         # source_video_name is useful only for local resolution.  It is kept in
@@ -119,6 +136,7 @@ class VideoRecord:
             "source_video_name": self.source_video_name,
             "dataset": self.dataset,
             "image_root": self.image_root,
+            "source_video_uid": self.source_video_uid or self.video_id,
             "frames": [f.as_dict() for f in self.frames],
         }
 
@@ -159,6 +177,11 @@ def annotation_from_dict(value: Dict[str, Any]) -> AnnotationRecord:
         label_status=value.get("label_status", "reliable"),
         score=value.get("score"),
         iscrowd=int(value.get("iscrowd", 0)),
+        acquired_stage=value.get("acquired_stage", ""),
+        track_uid=value.get("track_uid", ""),
+        teacher_checkpoint_sha256=value.get("teacher_checkpoint_sha256"),
+        pl_segment_id=value.get("pl_segment_id"),
+        reliability=value.get("reliability"),
     )
 
 
@@ -183,18 +206,33 @@ def frame_from_dict(value: Dict[str, Any]) -> FrameRecord:
         ignore_regions=list(value.get("ignore_regions", [])),
         annotation_valid=bool(value.get("annotation_valid", True)),
         source_image_id=value.get("source_image_id"),
+        source_video_uid=value.get("source_video_uid", ""),
+        frame_uid=value.get("frame_uid", ""),
     )
 
 
 def video_from_dict(value: Dict[str, Any]) -> VideoRecord:
+    source_video_uid = str(value.get("source_video_uid") or value.get("video_id"))
+    frames = [frame_from_dict(f) for f in value.get("frames", [])]
+    # Older manifests did not carry stable source/frame UIDs.  Derive them at
+    # the read boundary without changing the source file on disk.
+    for frame in frames:
+        if not frame.source_video_uid:
+            frame.source_video_uid = source_video_uid
+        if not frame.frame_uid:
+            frame.frame_uid = "%s:%06d" % (source_video_uid, frame.frame_index)
+        for ann in frame.annotations:
+            if not ann.track_uid:
+                ann.track_uid = "%s:%s" % (source_video_uid, ann.track_id)
     return VideoRecord(
         video_id=value["video_id"],
         split=value["split"],
         width=int(value["width"]),
         height=int(value["height"]),
-        frames=[frame_from_dict(f) for f in value.get("frames", [])],
+        frames=frames,
         source_video_id=value.get("source_video_id"),
         source_video_name=value.get("source_video_name"),
         dataset=value.get("dataset", "TAO-Amodal"),
         image_root=value.get("image_root"),
+        source_video_uid=source_video_uid,
     )
