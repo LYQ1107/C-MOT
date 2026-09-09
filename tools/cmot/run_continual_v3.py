@@ -14,6 +14,7 @@ import shutil
 import sys
 import time
 from collections import Counter, defaultdict
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -85,6 +86,48 @@ def _write_jsonl(path: str, records: Iterable[Mapping[str, Any]], metadata: Opti
             handle.write(json.dumps({"record_type": "metadata", "metadata": dict(metadata)}, sort_keys=True) + "\n")
         for record in records:
             handle.write(json.dumps(dict(record), sort_keys=True) + "\n")
+
+
+def _build_frame_identity_ablation_view(source_view_path: str, output_path: str) -> dict:
+    """Derive the matched frame-PL control without reselecting pseudo labels."""
+    source_sha256 = sha256_file(source_view_path)
+    payload = deepcopy(_read_json(source_view_path))
+    changed = 0
+    for video in payload.get("videos", []):
+        source_video_uid = str(video.get("source_video_uid") or video.get("video_id"))
+        for frame in video.get("frames", []):
+            frame_uid = str(frame.get("frame_uid") or frame.get("frame_key"))
+            for annotation in frame.get("annotations", []):
+                if annotation.get("label_source") != "pl":
+                    continue
+                segment_id = str(annotation.get("pl_segment_id") or "")
+                teacher_track_id = int(annotation.get("teacher_track_id", annotation.get("track_id", -1)))
+                identity_string = "%s|frame_qpl|%s|%s|%s" % (
+                    source_video_uid,
+                    frame_uid,
+                    segment_id,
+                    teacher_track_id,
+                )
+                new_track_id = int.from_bytes(
+                    hashlib.sha256(identity_string.encode("utf-8")).digest()[:8],
+                    "big",
+                ) & ((1 << 62) - 1)
+                annotation["original_teacher_track_id"] = teacher_track_id
+                annotation["track_id"] = new_track_id
+                annotation["track_uid"] = "%s:frame_qpl:%d" % (source_video_uid, new_track_id)
+                changed += 1
+    payload["ablation"] = {
+        "type": "frame_independent_pl_identity",
+        "source_view_sha256": source_sha256,
+        "preserve_pl_frames": True,
+        "preserve_pl_segment_sampling": True,
+        "cross_frame_pl_identity": False,
+        "pl_annotations_rekeyed": int(changed),
+    }
+    payload.pop("manifest_hash", None)
+    payload["manifest_hash"] = canonical_json_hash(payload)
+    write_json(output_path, payload)
+    return payload
 
 
 def _view_hash(path: str) -> str:
@@ -508,7 +551,7 @@ class V3Runner:
             raise ValueError("unsupported V3 runtime schema")
         self.paths = dict(self.runtime.get("paths", {}))
         self.targets = tuple(value for value in targets if value)
-        allowed = {"diagnose", "s0", "joint", "s1", "s2", "p3", "motion"}
+        allowed = {"diagnose", "s0", "joint", "s1", "s2", "p3", "motion", "controls"}
         if not set(self.targets) <= allowed:
             raise ValueError("unknown V3 target: %s" % sorted(set(self.targets) - allowed))
         self.resume = bool(resume)
@@ -709,6 +752,933 @@ class V3Runner:
         self.state["artifacts"]["views"] = {key: {"basename": Path(value).name, "sha256": sha256_file(value), "manifest_hash": _view_hash(value)} for key, value in views.items()}
         self._save_state()
         return views
+
+    def _control_reference_results(self) -> Dict[str, dict]:
+        """Read the immutable public V3.1 results used as control references."""
+        report_path = REPO_ROOT / "reports" / "v3_1" / "results.json"
+        if not report_path.is_file():
+            raise FileNotFoundError("missing V3.1 public reference report")
+        payload = _read_json(str(report_path))
+        references = {
+            str(value.get("method")): dict(value)
+            for value in payload.get("results", [])
+            if value.get("method")
+        }
+        required = ("R-QPLSEG-S1", "R-QPLSEG-KD-S1", "R-QPLSEG-S2", "R-QPLSEG-KD-S2")
+        missing = [method for method in required if method not in references]
+        if missing:
+            raise RuntimeError("missing V3.1 control reference results: %s" % missing)
+        return references
+
+    def _control_inputs(self, references: Mapping[str, Mapping[str, Any]]) -> dict:
+        """Resolve and hash all frozen inputs before starting any control run."""
+        if self.previous_root is None:
+            raise FileNotFoundError("control runtime requires previous_run_root")
+        base = self.previous_root
+        paths = {
+            "s0_checkpoint": self.paths.get("historical_s0_checkpoint"),
+            "s1_checkpoint": base / "runs" / "R-QPLSEG-S1" / "checkpoint_600.pt",
+            "s1_kd_checkpoint": base / "runs" / "R-QPLSEG-KD-S1" / "checkpoint_600.pt",
+            "s2_checkpoint": base / "runs" / "R-QPLSEG-S2" / "checkpoint_600.pt",
+            "s2_kd_checkpoint": base / "runs" / "R-QPLSEG-KD-S2" / "checkpoint_600.pt",
+            "s1_qpl_view": base / "manifests" / "S1_qpl_segment_current_train.json",
+            "s1_replay": base / "memories" / "S1_replay.json",
+            "s1_qpl_manifest": base / "teachers" / "S1_qpl_segment_v2.jsonl",
+            "s1_eval_view": base / "manifests" / "S1_eval.json",
+            "s2_base_view": base / "manifests" / "S2_current_train.json",
+            "s2_qpl_view": base / "manifests" / "S2_qpl_segment_current_train.json",
+            "s2_replay": base / "memories" / "S2_replay.json",
+            "s2_qpl_manifest": base / "teachers" / "S2_qpl_segment_v2.jsonl",
+            "s2_eval_view": base / "manifests" / "S2_eval.json",
+        }
+        if paths["s0_checkpoint"]:
+            paths["s0_checkpoint"] = Path(str(paths["s0_checkpoint"]))
+        expected = {
+            "s0_checkpoint": "800ba237fb556473ee71f0606e2e02c7b680558f2f4ebc3e0ea3b8656c0d8d51",
+            "s1_checkpoint": "e5157b270878bab010954c7642f8eb3cb5562e80b3a3e9073748e52237a216e1",
+            "s1_kd_checkpoint": "ac3cfa45c3d2efdf0f48cf6c6e1d94e9e2044601cc680cf7e08d790685c1c522",
+            "s2_checkpoint": "470f0e17096fda5bf43445bf39a8015e2333907f2d321de5a0833ce90d51e6c2",
+            "s2_kd_checkpoint": "8d85cf6f238229127fd12930e7c4c14f0335c8c7f26db4be1a18d8f8aaa638a7",
+            "s1_qpl_view": "4daf00f4f34773bed8891057f72640f83fd95225ab258ec0da52a93f4d14e069",
+            "s1_replay": "16994c154090bc5221f76b4a9b096ec0e3f10b00ac53bf2f97e268128f73c12f",
+            "s1_qpl_manifest": "6208dbd2aabcec502d64e7c00230742818cdef7d649cced5a67c79ad2b0e9ebc",
+            "s2_qpl_view": "e594856639d5ef696680ce33645aa488e2377cd167221d1398a1515ca3856f7c",
+            "s2_replay": "7f8e323dd4b3265778ac15b1b68d1177d7a5c96db586a2bdcfd0b80b51a6d707",
+            "s2_qpl_manifest": "e4bac5c7595f5e78d3a9b9444e3fdbf03488ba7611de62c0bda48a6c1c63bddc",
+        }
+        hashes = {}
+        for label, raw_path in paths.items():
+            if not raw_path:
+                raise FileNotFoundError("missing control input path: %s" % label)
+            path = Path(raw_path)
+            if not path.is_file():
+                raise FileNotFoundError("missing control input %s: %s" % (label, path.name))
+            actual = sha256_file(str(path))
+            hashes[label] = actual
+            if label in expected and actual != expected[label]:
+                raise RuntimeError("BLOCKED_ARTIFACT_HASH_MISMATCH %s: %s != %s" % (label, actual, expected[label]))
+        eval_hash = sha256_file(self.eval_slice)
+        if eval_hash != "f37ed78d861b6c04f37ade692db59b99a025c591fd6e4c2a21339cfb38c0254e":
+            raise RuntimeError("BLOCKED_ARTIFACT_HASH_MISMATCH immutable_eval_manifest")
+        checkpoint_labels = {
+            "R-QPLSEG-S1": "s1_checkpoint",
+            "R-QPLSEG-KD-S1": "s1_kd_checkpoint",
+            "R-QPLSEG-S2": "s2_checkpoint",
+            "R-QPLSEG-KD-S2": "s2_kd_checkpoint",
+        }
+        for method, label in checkpoint_labels.items():
+            reference = references[method]
+            checkpoint = reference.get("checkpoint")
+            if isinstance(checkpoint, Mapping) and checkpoint.get("sha256"):
+                actual = hashes[label]
+                if actual != checkpoint["sha256"]:
+                    raise RuntimeError("BLOCKED_ARTIFACT_HASH_MISMATCH reference_%s_checkpoint" % method)
+        for method in ("R-QPLSEG-S1", "R-QPLSEG-KD-S1"):
+            reference = references[method]
+            for key, label in (("current_view_sha256", "s1_qpl_view"), ("replay_view_sha256", "s1_replay"), ("pl_manifest_sha256", "s1_qpl_manifest")):
+                if reference.get(key) != hashes[label]:
+                    raise RuntimeError("BLOCKED_ARTIFACT_HASH_MISMATCH %s_%s" % (method, key))
+        for method in ("R-QPLSEG-S2", "R-QPLSEG-KD-S2"):
+            reference = references[method]
+            for key, label in (("current_view_sha256", "s2_qpl_view"), ("replay_view_sha256", "s2_replay"), ("pl_manifest_sha256", "s2_qpl_manifest")):
+                if reference.get(key) != hashes[label]:
+                    raise RuntimeError("BLOCKED_ARTIFACT_HASH_MISMATCH %s_%s" % (method, key))
+        if references["R-QPLSEG-KD-S2"].get("pl_manifest_sha256") != hashes["s2_qpl_manifest"]:
+            raise RuntimeError("BLOCKED_ARTIFACT_HASH_MISMATCH existing_D_qpl_manifest_requires_fixed_pl")
+        for label in ("s1_qpl_view", "s1_replay", "s1_qpl_manifest", "s2_base_view", "s2_qpl_view", "s2_replay", "s2_qpl_manifest", "s1_eval_view", "s2_eval_view"):
+            if label.endswith("_view"):
+                _view_hash(str(paths[label]))
+        s2_base = _read_json(str(paths["s2_base_view"]))
+        if s2_base.get("pl_source") is not None or int(s2_base.get("stats", {}).get("pl_used", 0)) != 0:
+            raise RuntimeError("INVALID_2X2_CONTROL S2_current contains PL")
+        result = {
+            "paths": {key: str(value) for key, value in paths.items()},
+            "hashes": hashes,
+            "eval_manifest_sha256": eval_hash,
+            "references": references,
+            "fixed_qpl_d_required": False,
+        }
+        self.state.setdefault("artifacts", {})["control_inputs"] = {
+            key: {"basename": Path(value).name, "sha256": hashes.get(key)}
+            for key, value in paths.items()
+            if value
+        }
+        self.state["artifacts"]["control_inputs"]["immutable_eval_manifest"] = {
+            "basename": Path(self.eval_slice).name,
+            "sha256": eval_hash,
+        }
+        self._save_state()
+        return result
+
+    @staticmethod
+    def _validate_frame_identity_view(source_path: str, derived_path: str) -> dict:
+        source = _read_json(source_path)
+        derived = _read_json(derived_path)
+        if derived.get("ablation", {}).get("source_view_sha256") != sha256_file(source_path):
+            raise RuntimeError("INVALID_MATCHED_CONTROL frame view source hash")
+        source_videos = source.get("videos", [])
+        derived_videos = derived.get("videos", [])
+        if len(source_videos) != len(derived_videos):
+            raise RuntimeError("INVALID_MATCHED_CONTROL frame view video count")
+        rekeyed = 0
+        for source_video, derived_video in zip(source_videos, derived_videos):
+            source_video_core = {key: value for key, value in source_video.items() if key != "frames"}
+            derived_video_core = {key: value for key, value in derived_video.items() if key != "frames"}
+            if source_video_core != derived_video_core or len(source_video.get("frames", [])) != len(derived_video.get("frames", [])):
+                raise RuntimeError("INVALID_MATCHED_CONTROL frame view video metadata")
+            for source_frame, derived_frame in zip(source_video.get("frames", []), derived_video.get("frames", [])):
+                source_frame_core = {key: value for key, value in source_frame.items() if key != "annotations"}
+                derived_frame_core = {key: value for key, value in derived_frame.items() if key != "annotations"}
+                if source_frame_core != derived_frame_core or len(source_frame.get("annotations", [])) != len(derived_frame.get("annotations", [])):
+                    raise RuntimeError("INVALID_MATCHED_CONTROL frame metadata")
+                for source_ann, derived_ann in zip(source_frame.get("annotations", []), derived_frame.get("annotations", [])):
+                    if source_ann.get("label_source") != "pl":
+                        if source_ann != derived_ann:
+                            raise RuntimeError("INVALID_MATCHED_CONTROL non-PL annotation changed")
+                        continue
+                    source_core = {key: value for key, value in source_ann.items() if key not in ("track_id", "track_uid", "original_teacher_track_id")}
+                    derived_core = {key: value for key, value in derived_ann.items() if key not in ("track_id", "track_uid", "original_teacher_track_id")}
+                    if source_core != derived_core:
+                        raise RuntimeError("INVALID_MATCHED_CONTROL PL annotation changed")
+                    if "original_teacher_track_id" not in derived_ann:
+                        raise RuntimeError("INVALID_MATCHED_CONTROL missing original teacher track ID")
+                    rekeyed += 1
+        _view_hash(derived_path)
+        return {"source_view_sha256": sha256_file(source_path), "derived_view_sha256": sha256_file(derived_path), "pl_annotations_rekeyed": rekeyed}
+
+    def _control_sampler_plan(self, train_view: str, replay_view: str, resolved: Mapping[str, Any]) -> str:
+        from cmot.ovtr_runtime import _ensure_ovtr_imports
+        _ensure_ovtr_imports(str(REPO_ROOT / "ovtr"))
+        from cmot.data.real_video_dataset import ContinualVideoDataset
+        from cmot.data.sampling import BalancedClipSampler
+        training = dict(resolved.get("training", {}))
+        dataset = ContinualVideoDataset(
+            train_view,
+            _path_value(self.paths, "image_root"),
+            [int(value) for value in resolved.get("active_global_ids", [])],
+            clip_len=int(training.get("clip_frames", 4)),
+            input_size=tuple(int(value) for value in training.get("input_size", [640, 360])),
+            split="train",
+            replay_path=replay_view,
+            clip_strides=(1,),
+            focus_global_ids=[int(value) for value in resolved.get("new_global_ids", [])],
+        )
+        replay_cfg = dict(resolved.get("replay", {}))
+        pseudo_cfg = dict(resolved.get("pseudo", {}))
+        sampler = BalancedClipSampler(
+            dataset,
+            total_steps=int(training.get("incremental_steps", 600)),
+            start_step=0,
+            seed=int(resolved.get("seed", self.config["seed"])),
+            stage_id=str(resolved.get("stage")),
+            stream_schedule=tuple(replay_cfg.get("ratio_schedule", ("current", "replay"))),
+            negative_fraction=float(replay_cfg.get("negative_fraction", 0.2)),
+            pl_clip_fraction=float(pseudo_cfg.get("pl_clip_fraction", 0.0)),
+            enable_pl=bool(resolved.get("enable_pl", False)),
+        )
+        return sampler.plan_hash()
+
+    @staticmethod
+    def _assert_common_runtime(resolved: Mapping[str, Any], reference: Mapping[str, Any], label: str) -> None:
+        checks = []
+        for key in ("clip_frames", "input_size", "lr_backbone", "lr_heads", "lr_motion", "weight_decay", "max_grad_norm", "incremental_steps", "s2_steps"):
+            checks.append(("training." + key, dict(resolved.get("training", {})).get(key), dict(reference.get("training", {})).get(key)))
+        for key in ("ratio_schedule", "clip_len", "negative_fraction"):
+            checks.append(("replay." + key, dict(resolved.get("replay", {})).get(key), dict(reference.get("replay", {})).get(key)))
+        for key in ("birth_threshold", "keep_threshold", "export_threshold", "miss_tolerance", "duplicate_iou", "duplicate_feature_cos"):
+            checks.append(("inference." + key, dict(resolved.get("inference", {})).get(key), dict(reference.get("inference", {})).get(key)))
+        mismatches = [name for name, actual, expected in checks if actual != expected]
+        if mismatches:
+            raise RuntimeError("INVALID_2X2_CONTROL %s runtime mismatch: %s" % (label, mismatches))
+
+    @staticmethod
+    def _control_exposure_mismatches(exposure: Mapping[str, Any]) -> List[str]:
+        expected = {
+            "steps_by_stream": {"current": 300, "replay": 300},
+            "pl_segment_clip_steps": 75,
+            "pl_annotations_seen": 204,
+            "pl_segments_unique_seen": 20,
+            "source_video_uids_unique": 36,
+            "annotations_by_source": {"gt": 2162, "gt_replay": 8550, "pl": 204},
+            "annotations_by_global_id": {"206": 8754, "792": 2162},
+        }
+        return [key for key, value in expected.items() if exposure.get(key) != value]
+
+    @staticmethod
+    def _control_status_from_exception(exc: Exception) -> str:
+        message = str(exc)
+        for status in (
+            "BLOCKED_ARTIFACT_HASH_MISMATCH",
+            "INVALID_MATCHED_CONTROL",
+            "INVALID_2X2_CONTROL",
+        ):
+            if message.startswith(status):
+                return status
+        return "FAILED"
+
+    @staticmethod
+    def _control_exposure_diff(actual: Mapping[str, Any], expected: Mapping[str, Any], exact: bool = False) -> List[str]:
+        fields = (
+            "steps_by_stream", "pl_segment_clip_steps", "pl_annotations_seen",
+            "pl_segments_unique_seen", "source_video_uids_unique",
+            "annotations_by_source", "annotations_by_global_id",
+        )
+        mismatches = []
+        for field in fields:
+            if field not in expected:
+                continue
+            if actual.get(field) != expected.get(field):
+                mismatches.append(field)
+        if exact:
+            for field in ("frames_seen", "frame_keys_unique", "video_ids_unique", "clip_ids_unique"):
+                if field in expected and actual.get(field) != expected.get(field):
+                    mismatches.append(field)
+        return mismatches
+
+    def _control_failure_record(
+        self,
+        stage: str,
+        method: str,
+        resolved: Mapping[str, Any],
+        status: str,
+        reason: str,
+        audit: Optional[Mapping[str, Any]] = None,
+        parent_checkpoint: Optional[str] = None,
+        teacher_checkpoint: Optional[str] = None,
+    ) -> dict:
+        record = _not_run_record(stage, method, resolved, reason, status)
+        record["comparison_eligible"] = False
+        record["control_audit"] = dict(audit or {})
+        if parent_checkpoint and Path(parent_checkpoint).is_file():
+            record["parent_checkpoint_sha256"] = sha256_file(parent_checkpoint)
+        if teacher_checkpoint and Path(teacher_checkpoint).is_file():
+            record["teacher_checkpoint_sha256"] = sha256_file(teacher_checkpoint)
+        return record
+
+    def _control_runtime_resolved(self, method: str, stage: str, reference_method: str) -> dict:
+        resolved = self._resolved(method, stage)
+        resolved["protocol_hash"] = canonical_json_hash({
+            "canonical": sha256_file(self.canonical),
+            "eval": sha256_file(self.eval_slice),
+            "seed": self.config["seed"],
+            "stage": stage,
+            "method_family": "QPLSEG",
+        })
+        reference_path = self.previous_root / "runs" / reference_method / "resolved_runtime_config.json"
+        if not reference_path.is_file():
+            raise FileNotFoundError("missing reference resolved config %s" % reference_path.name)
+        reference_resolved = _read_json(str(reference_path))
+        self._assert_common_runtime(resolved, reference_resolved, method)
+        return resolved
+
+    def _run_control_experiment(self, spec: Mapping[str, Any], inputs: Mapping[str, Any], references: Mapping[str, Mapping[str, Any]]) -> dict:
+        method = str(spec["method"])
+        stage = str(spec["stage"])
+        existing = self._result(method)
+        if self.resume and existing and existing.get("execution_status") in (
+            "COMPLETE",
+            "BLOCKED_ARTIFACT_HASH_MISMATCH", "BLOCKED_KD_NO_STUDENT_OR_TEACHER_IOU",
+            "BLOCKED_KD_NO_STUDENT_IOU", "BLOCKED_KD_NO_TEACHER_IOU",
+            "BLOCKED_KD_NO_VALID_ALIGNMENT",
+        ):
+            return existing
+
+        resolved = self._resolved(str(spec["base_method"]), stage)
+        expected_flags = tuple(bool(value) for value in spec["flags"])
+        actual_flags = (
+            bool(resolved.get("enable_pl")),
+            bool(resolved.get("enable_kd")),
+            bool(resolved.get("enable_motion")),
+        )
+        if actual_flags != expected_flags:
+            record = self._control_failure_record(
+                stage, method, resolved, "INVALID_2X2_CONTROL",
+                "method flags do not match the V3.1 control contract: %s != %s" % (actual_flags, expected_flags),
+            )
+            return self._record_result(method, record)
+
+        train_view = str(spec["train_view"])
+        replay_view = str(spec["replay_view"])
+        eval_view = str(spec["eval_view"])
+        parent_checkpoint = str(spec["parent_checkpoint"])
+        teacher_checkpoint = spec.get("teacher_checkpoint")
+        teacher_checkpoint = None if teacher_checkpoint is None else str(teacher_checkpoint)
+        steps = int(spec.get("steps", 600))
+        qpl_manifest = spec.get("qpl_manifest")
+        qpl_manifest = None if qpl_manifest is None else str(qpl_manifest)
+        reference_method = str(spec["reference_method"])
+        audit = {
+            "control_method": method,
+            "reference_method": reference_method,
+            "parent_checkpoint_basename": Path(parent_checkpoint).name,
+            "current_view_basename": Path(train_view).name,
+            "replay_view_basename": Path(replay_view).name,
+            "eval_view_basename": Path(eval_view).name,
+            "qpl_manifest_basename": None if not qpl_manifest else Path(qpl_manifest).name,
+            "expected_optimizer_steps": steps,
+            "comparison_eligible": False,
+        }
+        try:
+            if not Path(parent_checkpoint).is_file():
+                raise FileNotFoundError("missing parent checkpoint %s" % Path(parent_checkpoint).name)
+            if teacher_checkpoint and not Path(teacher_checkpoint).is_file():
+                raise FileNotFoundError("missing teacher checkpoint %s" % Path(teacher_checkpoint).name)
+            if not Path(train_view).is_file() or not Path(replay_view).is_file() or not Path(eval_view).is_file():
+                raise FileNotFoundError("missing control view artifact")
+            parent_sha = sha256_file(parent_checkpoint)
+            current_sha = sha256_file(train_view)
+            replay_sha = sha256_file(replay_view)
+            eval_view_sha = sha256_file(eval_view)
+            qpl_sha = None if not qpl_manifest else sha256_file(qpl_manifest)
+            audit.update({
+                "parent_checkpoint_sha256": parent_sha,
+                "current_view_sha256": current_sha,
+                "replay_view_sha256": replay_sha,
+                "eval_view_sha256": eval_view_sha,
+                "qpl_manifest_sha256": qpl_sha,
+                "eval_manifest_sha256": inputs["eval_manifest_sha256"],
+            })
+            if parent_sha != str(spec["parent_sha256"]):
+                raise RuntimeError("BLOCKED_ARTIFACT_HASH_MISMATCH %s parent checkpoint" % method)
+            for name, actual, expected in (
+                ("current_view", current_sha, spec.get("current_sha256")),
+                ("replay_view", replay_sha, spec.get("replay_sha256")),
+                ("qpl_manifest", qpl_sha, spec.get("qpl_sha256")),
+            ):
+                if expected is not None and actual != expected:
+                    raise RuntimeError("BLOCKED_ARTIFACT_HASH_MISMATCH %s %s" % (method, name))
+                if expected is None and actual is not None:
+                    raise RuntimeError("INVALID_2X2_CONTROL %s unexpectedly has %s" % (method, name))
+            if inputs["eval_manifest_sha256"] != "f37ed78d861b6c04f37ade692db59b99a025c591fd6e4c2a21339cfb38c0254e":
+                raise RuntimeError("BLOCKED_ARTIFACT_HASH_MISMATCH %s immutable eval manifest" % method)
+            for matching_method in spec.get("matching_methods", ()):
+                reference = references[str(matching_method)]
+                for key, actual, reference_key in (
+                    ("replay_view_sha256", replay_sha, "replay_view_sha256"),
+                    ("qpl_manifest_sha256", qpl_sha, "pl_manifest_sha256"),
+                ):
+                    expected = reference.get(reference_key)
+                    if expected != actual:
+                        raise RuntimeError("INVALID_2X2_CONTROL %s %s differs from %s" % (method, key, matching_method))
+                if str(spec.get("matching_current", "")) == "reference" and reference.get("current_view_sha256") != current_sha:
+                    raise RuntimeError("INVALID_2X2_CONTROL %s current view differs from %s" % (method, matching_method))
+            if spec.get("expected_sampler_plan") is not None:
+                resolved = self._control_runtime_resolved(str(spec["base_method"]), stage, reference_method)
+                resolved["replay_memory_version"] = _read_json(replay_view).get("memory_version")
+                sampler_plan = self._control_sampler_plan(train_view, replay_view, resolved)
+                audit["sampler_plan_hash"] = sampler_plan
+                if sampler_plan != spec["expected_sampler_plan"]:
+                    raise RuntimeError("INVALID_MATCHED_CONTROL %s sampler plan %s != %s" % (method, sampler_plan, spec["expected_sampler_plan"]))
+            else:
+                resolved = self._control_runtime_resolved(str(spec["base_method"]), stage, reference_method)
+                resolved["replay_memory_version"] = _read_json(replay_view).get("memory_version")
+                sampler_plan = self._control_sampler_plan(train_view, replay_view, resolved)
+                audit["sampler_plan_hash"] = sampler_plan
+            audit["inference_thresholds"] = {
+                key: resolved.get("inference", {}).get(key)
+                for key in ("birth_threshold", "keep_threshold", "export_threshold", "miss_tolerance", "duplicate_iou", "duplicate_feature_cos")
+            }
+            self._event("control_audit_pass", run=method, sampler_plan_hash=sampler_plan)
+        except Exception as exc:
+            status = self._control_status_from_exception(exc)
+            record = self._control_failure_record(
+                stage, method, resolved, status, str(exc), audit,
+                parent_checkpoint, teacher_checkpoint,
+            )
+            self._event("control_precondition_failure", run=method, status=status, message=str(exc))
+            return self._record_result(method, record)
+
+        memory_version = resolved.get("replay_memory_version")
+        pl_audit = spec.get("pl_audit")
+        try:
+            self._event("train_start", run=method, steps=steps)
+            train_summary = self._train_stage(
+                resolved, train_view, method, parent_checkpoint,
+                replay_view=replay_view,
+                teacher_checkpoint=teacher_checkpoint,
+                teacher_active=spec.get("teacher_active", (206,)),
+                teacher_resolved=spec.get("teacher_resolved"),
+            )
+            eval_summary, metrics = self._evaluate(resolved, train_summary, eval_view, method)
+            record = _result_record(
+                stage, method, resolved, train_summary, eval_summary, metrics,
+                parent_checkpoint, teacher_checkpoint, qpl_manifest, pl_audit,
+                memory_version, evaluation_scope="pilot",
+            )
+            audit["actual_optimizer_steps"] = int(train_summary.get("steps_completed", 0))
+            audit["checkpoint_sha256"] = train_summary.get("checkpoint_sha256")
+            audit["prediction_sha256"] = eval_summary.get("prediction_sha256")
+            audit["metrics_sha256"] = sha256_file(str(eval_summary["metrics_path"]))
+            exposure = train_summary.get("exposure", {})
+            exposure_reference = spec.get("exposure_reference")
+            exposure_mismatches = []
+            if exposure_reference:
+                exposure_mismatches = self._control_exposure_diff(
+                    exposure, exposure_reference.get("exposure", {}), exact=True,
+                )
+            elif steps == 600:
+                exposure_mismatches = self._control_exposure_mismatches(exposure)
+                exposure_mismatches = [value for value in exposure_mismatches if value not in (
+                    "pl_segment_clip_steps", "pl_annotations_seen", "pl_segments_unique_seen",
+                    "source_video_uids_unique", "annotations_by_source", "annotations_by_global_id",
+                )]
+                if exposure.get("pl_annotations_seen", 0) != 0 or exposure.get("annotations_by_source", {}).get("pl", 0) != 0:
+                    exposure_mismatches.append("pl_annotations_seen")
+            if int(train_summary.get("steps_completed", 0)) != steps:
+                exposure_mismatches.append("optimizer_steps")
+            audit["exposure_mismatches"] = sorted(set(exposure_mismatches))
+            audit["comparison_eligible"] = not exposure_mismatches
+            record["control_audit"] = audit
+            record["comparison_eligible"] = not exposure_mismatches
+            if exposure_mismatches:
+                record["execution_status"] = "INVALID_MATCHED_CONTROL"
+                record["reason"] = "training exposure did not match the frozen control: %s" % sorted(set(exposure_mismatches))
+            return self._record_result(method, record)
+        except Exception as exc:
+            from cmot.train import KDAlignmentBlocked
+            if isinstance(exc, KDAlignmentBlocked):
+                record = _blocked_kd_record(
+                    stage, method, resolved, parent_checkpoint,
+                    teacher_checkpoint or parent_checkpoint, train_view, replay_view, exc,
+                )
+                record["control_audit"] = audit
+                record["comparison_eligible"] = False
+                self._event("control_training_failure", run=method, status=record.get("execution_status"), message=str(exc))
+                return self._record_result(method, record)
+            status = self._control_status_from_exception(exc)
+            record = self._control_failure_record(
+                stage, method, resolved, status, str(exc), audit,
+                parent_checkpoint, teacher_checkpoint,
+            )
+            self._event("control_training_failure", run=method, status=status, message=str(exc))
+            return self._record_result(method, record)
+
+    def _run_controls(self) -> dict:
+        references = {}
+        try:
+            references = self._control_reference_results()
+            inputs = self._control_inputs(references)
+        except Exception as exc:
+            status = self._control_status_from_exception(exc)
+            methods = (
+                ("S1", "R-QPLFRAME-S1", "R-QPLFRAME"),
+                ("S2", "R-QPLSEG-PARENT-ER-S2", "R-QPLSEG-PARENT-ER"),
+                ("S2", "R-QPLSEG-CURRKD-S2", "R-QPLSEG-CURRKD"),
+                ("S2", "R-QPLSEG-KDPARENT-NOKD-S2", "R-QPLSEG-KDPARENT-NOKD"),
+            )
+            for stage, method, base_method in methods:
+                resolved = self._resolved(base_method, stage)
+                self._record_result(method, self._control_failure_record(stage, method, resolved, status, str(exc)))
+            self._write_control_reports(references, None)
+            self._event("controls_blocked", status=status, message=str(exc))
+            return {"status": status, "targets": list(self.targets), "results": self.state.get("results", {})}
+
+        source_c1 = inputs["paths"]["s1_qpl_view"]
+        c1_path = self.manifest_root / "S1_qplframe_matched_current_train.json"
+        c1_precondition = None
+        c1_info = None
+        try:
+            if not c1_path.is_file() or not self.resume:
+                _build_frame_identity_ablation_view(source_c1, str(c1_path))
+            c1_info = self._validate_frame_identity_view(source_c1, str(c1_path))
+            self.state.setdefault("artifacts", {}).setdefault("controls", {})["S1_qplframe_view"] = {
+                "basename": c1_path.name,
+                **c1_info,
+            }
+            self._save_state()
+        except Exception as exc:
+            c1_precondition = (self._control_status_from_exception(exc), str(exc))
+            self._event("control_precondition_failure", run="R-QPLFRAME-S1", status=c1_precondition[0], message=str(exc))
+
+        s1_replay = inputs["paths"]["s1_replay"]
+        s2_replay = inputs["paths"]["s2_replay"]
+        s1_qpl_manifest = inputs["paths"]["s1_qpl_manifest"]
+        s2_qpl_manifest = inputs["paths"]["s2_qpl_manifest"]
+        s1_admission_path = self.previous_root / "teachers" / "S1_admission.json"
+        s2_admission_path = self.previous_root / "teachers" / "S2_admission.json"
+        s1_admission = _read_json(str(s1_admission_path)) if s1_admission_path.is_file() else None
+        s2_admission = _read_json(str(s2_admission_path)) if s2_admission_path.is_file() else None
+        s1_reference = references["R-QPLSEG-S1"]
+        s2_reference = references["R-QPLSEG-S2"]
+        kd_s1_reference = references["R-QPLSEG-KD-S1"]
+        common_s2 = {
+            "matching_methods": ("R-QPLSEG-S2", "R-QPLSEG-KD-S2"),
+            "matching_current": "reference",
+            "expected_sampler_plan": s2_reference.get("sampler_plan_hash"),
+            "train_view": inputs["paths"]["s2_qpl_view"],
+            "replay_view": inputs["paths"]["s2_replay"],
+            "current_sha256": inputs["hashes"]["s2_qpl_view"],
+            "replay_sha256": inputs["hashes"]["s2_replay"],
+            "qpl_sha256": inputs["hashes"]["s2_qpl_manifest"],
+            "eval_view": inputs["paths"]["s2_eval_view"],
+        }
+        specs = []
+        if c1_precondition:
+            stage, method, base_method = "S1", "R-QPLFRAME-S1", "R-QPLFRAME"
+            resolved = self._resolved(base_method, stage)
+            record = self._control_failure_record(stage, method, resolved, c1_precondition[0], c1_precondition[1])
+            record["control_audit"] = {"source_view_sha256": inputs["hashes"]["s1_qpl_view"], "comparison_eligible": False}
+            self._record_result(method, record)
+        else:
+            specs.append({
+                "stage": "S1", "method": "R-QPLFRAME-S1", "base_method": "R-QPLFRAME",
+                "flags": (True, False, False), "reference_method": "R-QPLSEG-S1",
+                "parent_checkpoint": inputs["paths"]["s0_checkpoint"], "parent_sha256": inputs["hashes"]["s0_checkpoint"],
+                "train_view": str(c1_path), "current_sha256": sha256_file(str(c1_path)),
+                "source_current_sha256": inputs["hashes"]["s1_qpl_view"], "replay_view": s1_replay,
+                "replay_sha256": inputs["hashes"]["s1_replay"], "eval_view": inputs["paths"]["s1_eval_view"],
+                "qpl_manifest": s1_qpl_manifest, "qpl_sha256": inputs["hashes"]["s1_qpl_manifest"],
+                "expected_sampler_plan": s1_reference.get("sampler_plan_hash"),
+                "exposure_reference": s1_reference, "pl_audit": s1_admission,
+                "matching_methods": (), "steps": 600,
+            })
+        specs.extend([
+            {
+                "stage": "S2", "method": "R-QPLSEG-PARENT-ER-S2", "base_method": "R-QPLSEG-PARENT-ER",
+                "flags": (False, False, False), "reference_method": "R-QPLSEG-S2",
+                "parent_checkpoint": inputs["paths"]["s1_checkpoint"], "parent_sha256": inputs["hashes"]["s1_checkpoint"],
+                "train_view": inputs["paths"]["s2_base_view"], "current_sha256": inputs["hashes"]["s2_base_view"],
+                "replay_view": s2_replay, "replay_sha256": inputs["hashes"]["s2_replay"],
+                "eval_view": inputs["paths"]["s2_eval_view"], "qpl_manifest": None, "qpl_sha256": None,
+                "expected_sampler_plan": None, "exposure_reference": None,
+                "matching_methods": (), "steps": 600,
+            },
+            {
+                "stage": "S2", "method": "R-QPLSEG-CURRKD-S2", "base_method": "R-QPLSEG-CURRKD",
+                "flags": (True, True, False), "reference_method": "R-QPLSEG-S2",
+                "parent_checkpoint": inputs["paths"]["s1_checkpoint"], "parent_sha256": inputs["hashes"]["s1_checkpoint"],
+                "teacher_checkpoint": inputs["paths"]["s1_checkpoint"], "teacher_active": (206, 792),
+                "teacher_resolved": self._resolved("R-QPLSEG", "S1"),
+                **common_s2, "qpl_manifest": s2_qpl_manifest, "pl_audit": s2_admission,
+                "exposure_reference": s2_reference, "steps": 600,
+            },
+            {
+                "stage": "S2", "method": "R-QPLSEG-KDPARENT-NOKD-S2", "base_method": "R-QPLSEG-KDPARENT-NOKD",
+                "flags": (True, False, False), "reference_method": "R-QPLSEG-S2",
+                "parent_checkpoint": inputs["paths"]["s1_kd_checkpoint"], "parent_sha256": inputs["hashes"]["s1_kd_checkpoint"],
+                **common_s2, "qpl_manifest": s2_qpl_manifest, "pl_audit": s2_admission,
+                "exposure_reference": s2_reference, "steps": 600,
+            },
+        ])
+        for spec in specs:
+            self._run_control_experiment(spec, inputs, references)
+        self._write_control_reports(references, inputs)
+        self._event("controls_complete", result_count=4)
+        return {"status": "COMPLETE", "targets": list(self.targets), "results": self.state.get("results", {})}
+
+    @staticmethod
+    def _public_control_record(value: Mapping[str, Any]) -> dict:
+        def clean(item):
+            if isinstance(item, Mapping):
+                return {
+                    str(key): clean(subvalue)
+                    for key, subvalue in item.items()
+                    if key not in ("pl_path", "path", "private_path", "runtime_path")
+                }
+            if isinstance(item, list):
+                return [clean(subvalue) for subvalue in item]
+            return item
+        return clean(dict(value))
+
+    @staticmethod
+    def _fmt_control_value(value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, str):
+            return value
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, float):
+            return "%.9f" % value
+        return str(value)
+
+    @staticmethod
+    def _control_metric_value(record: Mapping[str, Any], section: str, key: str) -> Any:
+        metrics = record.get("metrics", {})
+        if not isinstance(metrics, Mapping):
+            return "NOT_RUN"
+        value = metrics.get(section, {})
+        if not isinstance(value, Mapping):
+            return "NOT_RUN"
+        return value.get(key, "NOT_RUN")
+
+    @staticmethod
+    def _control_class_metric(record: Mapping[str, Any], global_id: int, key: str) -> Any:
+        metrics = record.get("metrics", {})
+        classes = metrics.get("per_class", {}) if isinstance(metrics, Mapping) else {}
+        row = classes.get(str(int(global_id)), {}) if isinstance(classes, Mapping) else {}
+        return row.get(key, "NOT_RUN") if isinstance(row, Mapping) else "NOT_RUN"
+
+    def _write_control_reports(self, references: Mapping[str, Mapping[str, Any]], inputs: Optional[Mapping[str, Any]]) -> None:
+        report_root = REPO_ROOT / "reports" / "v3_1_controls"
+        report_root.mkdir(parents=True, exist_ok=True)
+        methods = (
+            "R-QPLFRAME-S1", "R-QPLSEG-PARENT-ER-S2", "R-QPLSEG-CURRKD-S2", "R-QPLSEG-KDPARENT-NOKD-S2",
+        )
+        controls = {
+            method: self._public_control_record(self.state.get("results", {}).get(method, {
+                "method": method, "execution_status": "NOT_RUN", "reason": "NOT_RUN",
+            }))
+            for method in methods
+        }
+        public_references = {}
+        for method in ("R-QPLSEG-S1", "R-QPLSEG-KD-S1", "R-QPLSEG-S2", "R-QPLSEG-KD-S2"):
+            if method in references:
+                public_references[method] = self._public_control_record(references[method])
+        source_audit = dict(self.runtime.get("source_audit", {}))
+        write_json(str(report_root / "results.json"), {
+            "schema_version": "cmot.continual_v3_1.controls.public_results.v1",
+            "branch_purpose": "controlled_ablations_only",
+            "config": {"basename": Path(self.config_path).name, "sha256": sha256_file(self.config_path)},
+            "runtime_basename": Path(self.runtime_path).name,
+            "canonical_manifest_sha256": sha256_file(self.canonical),
+            "immutable_eval_manifest_sha256": sha256_file(self.eval_slice),
+            "source_audit": source_audit,
+            "download_audit": {
+                "status": "NOT_RUN_no_new_data_or_dependency_download",
+                "proxy_route_check": "NOT_RUN_no_download_requested",
+            },
+            "artifact_inputs": self.state.get("artifacts", {}).get("control_inputs", {}),
+            "references": public_references,
+            "results": list(controls.values()),
+        })
+
+        def metric_row(record: Mapping[str, Any], new_id: int) -> dict:
+            return {
+                "status": record.get("execution_status", "NOT_RUN"),
+                "old_HOTA": self._control_metric_value(record, "old_macro", "HOTA_mean"),
+                "old_IDF1": self._control_metric_value(record, "old_macro", "IDF1"),
+                "old_MOTA": self._control_metric_value(record, "old_macro", "MOTA"),
+                "new_HOTA": self._control_class_metric(record, new_id, "HOTA_mean"),
+                "new_IDF1": self._control_class_metric(record, new_id, "IDF1"),
+                "new_MOTA": self._control_class_metric(record, new_id, "MOTA"),
+                "new_recall": record.get("new_class_recall_at_hota_005", "NOT_RUN"),
+                "all_HOTA": self._control_metric_value(record, "all_seen_macro", "HOTA_mean"),
+                "all_IDF1": self._control_metric_value(record, "all_seen_macro", "IDF1"),
+                "all_MOTA": self._control_metric_value(record, "all_seen_macro", "MOTA"),
+                "all_DetA": self._control_metric_value(record, "all_seen_macro", "DetA_mean"),
+                "all_AssA": self._control_metric_value(record, "all_seen_macro", "AssA_mean"),
+            }
+
+        frame = metric_row(controls["R-QPLFRAME-S1"], 792)
+        segment = metric_row(public_references.get("R-QPLSEG-S1", {}), 792)
+        frame_lines = [
+            "# 表1：Frame vs Segment（C1）", "",
+            "比较只在 `comparison_eligible=true` 时成立；Delta 定义为 Segment − Frame。", "",
+            "| method | status | old HOTA | old IDF1 | old MOTA | new HOTA | new IDF1 | new MOTA | new recall | all HOTA | all IDF1 | all MOTA | DetA | AssA |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for label, row in (("R-QPLFRAME-S1", frame), ("R-QPLSEG-S1", segment)):
+            frame_lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                label, row["status"], *[self._fmt_control_value(row[key]) for key in (
+                    "old_HOTA", "old_IDF1", "old_MOTA", "new_HOTA", "new_IDF1", "new_MOTA", "new_recall",
+                    "all_HOTA", "all_IDF1", "all_MOTA", "all_DetA", "all_AssA")]
+            ))
+        delta = {}
+        for key in frame:
+            if key == "status":
+                continue
+            try:
+                delta[key] = float(segment[key]) - float(frame[key])
+            except (TypeError, ValueError):
+                delta[key] = "NOT_RUN"
+        frame_lines.extend([
+            "", "| Delta_SEG_vs_FRAME | — | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % tuple(
+                self._fmt_control_value(delta[key]) for key in (
+                    "old_HOTA", "old_IDF1", "old_MOTA", "new_HOTA", "new_IDF1", "new_MOTA", "new_recall",
+                    "all_HOTA", "all_IDF1", "all_MOTA", "all_DetA", "all_AssA")
+            ),
+            "", "- C1 exposure audit: `%s`." % self._fmt_control_value(controls["R-QPLFRAME-S1"].get("control_audit", {}).get("exposure_mismatches", [])),
+        ])
+        (report_root / "table1_frame_vs_segment.md").write_text("\n".join(frame_lines) + "\n", encoding="utf-8")
+
+        parent = controls["R-QPLSEG-PARENT-ER-S2"]
+        qpl_s2 = public_references.get("R-QPLSEG-S2", {})
+        def s2_row(record: Mapping[str, Any]) -> dict:
+            return {
+                "status": record.get("execution_status", "NOT_RUN"),
+                "old_HOTA": self._control_metric_value(record, "old_macro", "HOTA_mean"),
+                "old_IDF1": self._control_metric_value(record, "old_macro", "IDF1"),
+                "old_MOTA": self._control_metric_value(record, "old_macro", "MOTA"),
+                "truck_HOTA": self._control_class_metric(record, 1122, "HOTA_mean"),
+                "truck_IDF1": self._control_class_metric(record, 1122, "IDF1"),
+                "truck_MOTA": self._control_class_metric(record, 1122, "MOTA"),
+                "truck_TP": self._control_class_metric(record, 1122, "TP"),
+                "truck_FP": self._control_class_metric(record, 1122, "FP"),
+                "truck_FN": self._control_class_metric(record, 1122, "FN"),
+                "truck_IDSW": self._control_class_metric(record, 1122, "IDSW"),
+                "truck_recall": self._control_class_metric(record, 1122, "TP"),
+                "all_HOTA": self._control_metric_value(record, "all_seen_macro", "HOTA_mean"),
+                "all_IDF1": self._control_metric_value(record, "all_seen_macro", "IDF1"),
+                "all_MOTA": self._control_metric_value(record, "all_seen_macro", "MOTA"),
+                "all_DetA": self._control_metric_value(record, "all_seen_macro", "DetA_mean"),
+                "all_AssA": self._control_metric_value(record, "all_seen_macro", "AssA_mean"),
+            }
+        def first_threshold(value: Any) -> Any:
+            return value[0] if isinstance(value, list) and value else "NOT_RUN"
+        parent_row = s2_row(parent)
+        qpl_row = s2_row(qpl_s2)
+        for row in (parent_row, qpl_row):
+            row["truck_TP"] = first_threshold(row["truck_TP"])
+            row["truck_FP"] = first_threshold(row["truck_FP"])
+            row["truck_FN"] = first_threshold(row["truck_FN"])
+        truck_recall_parent = _metric_recall(parent.get("metrics", {}).get("per_class", {}).get("1122")) if isinstance(parent.get("metrics"), Mapping) else None
+        truck_recall_qpl = _metric_recall(qpl_s2.get("metrics", {}).get("per_class", {}).get("1122")) if isinstance(qpl_s2.get("metrics"), Mapping) else None
+        parent_row["truck_recall"] = truck_recall_parent if truck_recall_parent is not None else "NOT_RUN"
+        qpl_row["truck_recall"] = truck_recall_qpl if truck_recall_qpl is not None else "NOT_RUN"
+        parent_lines = [
+            "# 表2：S2 parent-matched QPL contribution（C2）", "",
+            "C2 与 R-QPLSEG-S2 的 parent 均绑定到 R-QPLSEG-S1；Delta 定义为 QPLSEG − parent-matched ER。", "",
+            "TP/FP/FN are reported at the first TrackEval threshold (HOTA@0.05); IDSW is cumulative.", "",
+            "| method | status | old HOTA | old IDF1 | old MOTA | truck HOTA | truck IDF1 | truck MOTA | truck TP@0.05 | truck FP@0.05 | truck FN@0.05 | truck IDSW | truck recall | all HOTA | all IDF1 | all MOTA | DetA | AssA |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for label, row in (("R-QPLSEG-PARENT-ER-S2", parent_row), ("R-QPLSEG-S2", qpl_row)):
+            values = [self._fmt_control_value(row[key]) for key in (
+                "old_HOTA", "old_IDF1", "old_MOTA", "truck_HOTA", "truck_IDF1", "truck_MOTA",
+                "truck_TP", "truck_FP", "truck_FN", "truck_IDSW", "truck_recall",
+                "all_HOTA", "all_IDF1", "all_MOTA", "all_DetA", "all_AssA")]
+            parent_lines.append("| %s | %s | %s |" % (label, row["status"], " | ".join(values)))
+        parent_delta = {}
+        for key in parent_row:
+            if key == "status":
+                continue
+            try:
+                if isinstance(qpl_row[key], list) or isinstance(parent_row[key], list):
+                    parent_delta[key] = "NOT_RUN"
+                else:
+                    parent_delta[key] = float(qpl_row[key]) - float(parent_row[key])
+            except (TypeError, ValueError):
+                parent_delta[key] = "NOT_RUN"
+        delta_values = [self._fmt_control_value(parent_delta[key]) for key in (
+            "old_HOTA", "old_IDF1", "old_MOTA", "truck_HOTA", "truck_IDF1", "truck_MOTA",
+            "truck_TP", "truck_FP", "truck_FN", "truck_IDSW", "truck_recall",
+            "all_HOTA", "all_IDF1", "all_MOTA", "all_DetA", "all_AssA")]
+        parent_lines.append("| Delta_QPLSEG_minus_PARENT_ER | — | %s |" % " | ".join(delta_values))
+        parent_sha_audit = parent.get("parent_checkpoint_sha256") == qpl_s2.get("parent_checkpoint_sha256")
+        parent_lines.extend(["", "- parent SHA equal: `%s`." % str(parent_sha_audit).lower()])
+        (report_root / "table2_parent_matched_s2.md").write_text("\n".join(parent_lines) + "\n", encoding="utf-8")
+
+        kd_methods = {
+            "A": public_references.get("R-QPLSEG-S2", {}),
+            "B": controls["R-QPLSEG-CURRKD-S2"],
+            "C": controls["R-QPLSEG-KDPARENT-NOKD-S2"],
+            "D": public_references.get("R-QPLSEG-KD-S2", {}),
+        }
+        kd_metric_names = (
+            ("old_HOTA", "old_macro", "HOTA_mean"), ("truck_HOTA", "class", "HOTA_mean"), ("all_HOTA", "all_seen_macro", "HOTA_mean"),
+            ("old_IDF1", "old_macro", "IDF1"), ("truck_IDF1", "class", "IDF1"), ("all_IDF1", "all_seen_macro", "IDF1"),
+            ("old_MOTA", "old_macro", "MOTA"), ("truck_MOTA", "class", "MOTA"), ("all_MOTA", "all_seen_macro", "MOTA"),
+            ("truck_recall", "recall", ""), ("DetA_mean", "all_seen_macro", "DetA_mean"), ("AssA_mean", "all_seen_macro", "AssA_mean"),
+        )
+        def kd_row(record: Mapping[str, Any]) -> dict:
+            result = {}
+            for name, section, key in kd_metric_names:
+                if section == "class":
+                    result[name] = self._control_class_metric(record, 1122, key)
+                elif section == "recall":
+                    metrics = record.get("metrics", {})
+                    classes = metrics.get("per_class", {}) if isinstance(metrics, Mapping) else {}
+                    result[name] = _metric_recall(classes.get("1122")) if isinstance(classes, Mapping) else "NOT_RUN"
+                else:
+                    result[name] = self._control_metric_value(record, section, key)
+            return result
+        kd_rows = {key: kd_row(value) for key, value in kd_methods.items()}
+        kd_lines = [
+            "# 表3：KD 2×2（S1 parent KD × S2 current KD）", "",
+            "A=R-QPLSEG-S2，B=R-QPLSEG-CURRKD-S2，C=R-QPLSEG-KDPARENT-NOKD-S2，D=R-QPLSEG-KD-S2。", "",
+            "| cell | method | status | " + " | ".join(name for name, _, _ in kd_metric_names) + " |",
+            "|---|---|---|" + "---:|" * len(kd_metric_names),
+        ]
+        for cell in ("A", "B", "C", "D"):
+            row = kd_rows[cell]
+            kd_lines.append("| %s | %s | %s | %s |" % (
+                cell, kd_methods[cell].get("method", cell), kd_methods[cell].get("execution_status", "NOT_RUN"),
+                " | ".join(self._fmt_control_value(row[name]) for name, _, _ in kd_metric_names),
+            ))
+        effect_names = ("B-A", "D-C", "C-A", "D-B", "D-C-B+A")
+        effects = {}
+        for effect in effect_names:
+            if effect == "B-A":
+                operands = (-1, 1, 0, 0)
+            elif effect == "D-C":
+                operands = (0, 0, -1, 1)
+            elif effect == "C-A":
+                operands = (-1, 0, 1, 0)
+            elif effect == "D-B":
+                operands = (0, -1, 0, 1)
+            else:
+                operands = (1, -1, -1, 1)
+            effects[effect] = {}
+            for name, _, _ in kd_metric_names:
+                try:
+                    values = {cell: float(kd_rows[cell][name]) for cell in "ABCD"}
+                    effects[effect][name] = (
+                        values["A"] * operands[0] + values["B"] * operands[1]
+                        + values["C"] * operands[2] + values["D"] * operands[3]
+                    )
+                except (TypeError, ValueError):
+                    effects[effect][name] = "NOT_RUN"
+        kd_lines.extend([
+            "", "## 主效应与 interaction", "",
+            "| effect | " + " | ".join(name for name, _, _ in kd_metric_names) + " |",
+            "|---|" + "---:|" * len(kd_metric_names),
+        ])
+        for effect in effect_names:
+            kd_lines.append("| %s | %s |" % (
+                effect, " | ".join(self._fmt_control_value(effects[effect][name]) for name, _, _ in kd_metric_names),
+            ))
+        (report_root / "table3_kd_2x2.md").write_text("\n".join(kd_lines) + "\n", encoding="utf-8")
+
+        audit_rows = []
+        audit_sources = {}
+        audit_sources.update(public_references)
+        audit_sources.update(controls)
+        for method in (
+            "R-QPLFRAME-S1", "R-QPLSEG-S1", "R-QPLSEG-PARENT-ER-S2", "R-QPLSEG-S2",
+            "R-QPLSEG-CURRKD-S2", "R-QPLSEG-KDPARENT-NOKD-S2", "R-QPLSEG-KD-S2",
+        ):
+            value = audit_sources.get(method, {})
+            audit = value.get("control_audit", {}) if isinstance(value, Mapping) else {}
+            thresholds = value.get("inference_thresholds", audit.get("inference_thresholds", {})) if isinstance(value, Mapping) else {}
+            if not audit and isinstance(value, Mapping):
+                audit = {
+                    "parent_checkpoint_sha256": value.get("parent_checkpoint_sha256"),
+                    "current_view_sha256": value.get("current_view_sha256"),
+                    "replay_view_sha256": value.get("replay_view_sha256"),
+                    "qpl_manifest_sha256": value.get("pl_manifest_sha256"),
+                    "sampler_plan_hash": value.get("sampler_plan_hash"),
+                    "eval_manifest_sha256": sha256_file(self.eval_slice),
+                    "actual_optimizer_steps": value.get("optimizer_steps", 0),
+                }
+            audit_rows.append({
+                "method": method,
+                "status": value.get("execution_status", "NOT_RUN") if isinstance(value, Mapping) else "NOT_RUN",
+                "parent_checkpoint_sha256": audit.get("parent_checkpoint_sha256", value.get("parent_checkpoint_sha256")),
+                "current_view_sha256": audit.get("current_view_sha256", value.get("current_view_sha256")),
+                "replay_view_sha256": audit.get("replay_view_sha256", value.get("replay_view_sha256")),
+                "qpl_manifest_sha256": audit.get("qpl_manifest_sha256", value.get("pl_manifest_sha256")),
+                "sampler_plan_sha256": audit.get("sampler_plan_hash", value.get("sampler_plan_hash")),
+                "eval_manifest_sha256": audit.get("eval_manifest_sha256", sha256_file(self.eval_slice)),
+                "optimizer_steps": audit.get("actual_optimizer_steps", value.get("optimizer_steps", 0)),
+                "inference_thresholds": thresholds,
+                "comparison_eligible": value.get("comparison_eligible", audit.get("comparison_eligible", "NOT_RUN")) if isinstance(value, Mapping) else "NOT_RUN",
+            })
+        write_json(str(report_root / "artifact_matching_audit.json"), audit_rows)
+        audit_lines = [
+            "# 表4：Artifact matching audit", "",
+            "哈希只引用文件 SHA256；eval manifest 为固定 immutable eval slice。", "",
+            "| method | status | parent checkpoint SHA | current view SHA | replay view SHA | QPL manifest SHA | sampler plan SHA | eval manifest SHA | steps | thresholds | eligible |",
+            "|---|---|---|---|---|---|---|---|---:|---|---|",
+        ]
+        for row in audit_rows:
+            audit_lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+                row["method"], row["status"], row["parent_checkpoint_sha256"], row["current_view_sha256"],
+                row["replay_view_sha256"], row["qpl_manifest_sha256"], row["sampler_plan_sha256"],
+                row["eval_manifest_sha256"], row["optimizer_steps"], self._fmt_control_value(row["inference_thresholds"]),
+                row["comparison_eligible"],
+            ))
+        (report_root / "table4_artifact_matching_audit.md").write_text("\n".join(audit_lines) + "\n", encoding="utf-8")
+
+        result_rows = []
+        for method in methods:
+            value = controls[method]
+            result_rows.append({
+                "method": method,
+                "stage": value.get("stage", "NOT_RUN"),
+                "status": value.get("execution_status", "NOT_RUN"),
+                "optimizer_steps": value.get("optimizer_steps", 0),
+                "comparison_eligible": value.get("comparison_eligible", "NOT_RUN"),
+                "old_HOTA": self._control_metric_value(value, "old_macro", "HOTA_mean"),
+                "truck_or_new_HOTA": self._control_class_metric(value, 792 if method.endswith("S1") else 1122, "HOTA_mean"),
+                "all_HOTA": self._control_metric_value(value, "all_seen_macro", "HOTA_mean"),
+                "old_IDF1": self._control_metric_value(value, "old_macro", "IDF1"),
+                "truck_or_new_IDF1": self._control_class_metric(value, 792 if method.endswith("S1") else 1122, "IDF1"),
+                "all_IDF1": self._control_metric_value(value, "all_seen_macro", "IDF1"),
+                "old_MOTA": self._control_metric_value(value, "old_macro", "MOTA"),
+                "truck_or_new_MOTA": self._control_class_metric(value, 792 if method.endswith("S1") else 1122, "MOTA"),
+                "all_MOTA": self._control_metric_value(value, "all_seen_macro", "MOTA"),
+                "reason": value.get("reason", ""),
+            })
+        if result_rows:
+            with (report_root / "results.csv").open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(result_rows[0]), lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(result_rows)
+
+        known_issues = [
+            "# V3.1 controlled-ablation known issues",
+            "",
+            "本轮只完成受规格授权的四个 controlled ablations；以下问题按规格保留，不进入本轮归因。",
+            "",
+            "- `DEFERRED_AFTER_CONTROL_EXPERIMENTS`: negative_fraction 当前实现与配置命名问题。",
+            "- `DEFERRED_AFTER_CONTROL_EXPERIMENTS`: effective_lambda aggregate 报告命名问题。",
+            "- `DEFERRED_AFTER_CONTROL_EXPERIMENTS`: `cmot/pseudo/track_filter.py::_limit_segment_length` 的 segment score 截取问题；本轮未修改、未重新筛选 PL。",
+            "- `DEFERRED_AFTER_CONTROL_EXPERIMENTS`: motion 及其它未授权 architecture/阈值变体。",
+            "",
+            "以上冻结项不应被解释为本轮控制实验已经修复。",
+        ]
+        (report_root / "known_issues.md").write_text("\n".join(known_issues) + "\n", encoding="utf-8")
 
     def _diagnose(self) -> dict:
         key = "asset_check_existing"
@@ -1886,6 +2856,8 @@ class V3Runner:
 
     def run(self) -> dict:
         self._event("start", targets=list(self.targets), resume=self.resume)
+        if "controls" in self.targets:
+            return self._run_controls()
         views = self._prepare_views()
         if "diagnose" in self.targets:
             self._diagnose()
