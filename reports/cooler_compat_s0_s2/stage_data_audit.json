@@ -1,0 +1,159 @@
+{
+  "schema_version": "cmot.cooler_compat.stage_data_audit.v1",
+  "stages": {
+    "oracle_s2": {
+      "gt_replay": 0,
+      "hidden_old_gt_annotations_loaded": 0,
+      "new_global_ids": [
+        206,
+        792,
+        1122
+      ],
+      "old_global_ids": [],
+      "seen_global_ids": [
+        206,
+        792,
+        1122
+      ],
+      "stage": "oracle_s2",
+      "status": "AUDITED_PARTIAL_SOURCE",
+      "train": {
+        "eligible_videos_have_new_gt": true,
+        "frames": 30439,
+        "gt_annotations_by_class": {
+          "car": 273821,
+          "pedestrian": 46392,
+          "truck": 25380
+        },
+        "hidden_old_gt_annotations_loaded": 0,
+        "source_videos": 154,
+        "view_manifest_sha256": "0efd5fbf9d7b84d3763657c4fc22589f558493ed5bd87ba4395c7c7ef6a14552"
+      },
+      "val": {
+        "eligible_videos_have_new_gt": true,
+        "frames": 7286,
+        "gt_annotations_by_class": {
+          "car": 68813,
+          "pedestrian": 7628,
+          "truck": 1917
+        },
+        "hidden_old_gt_annotations_loaded": 0,
+        "source_videos": 36,
+        "view_manifest_sha256": "be1cf5480f0a07fc4de2f1a5afec2e481ee6bd6bd4f643217bd3c9e16ef6f900"
+      }
+    },
+    "s0": {
+      "gt_replay": 0,
+      "hidden_old_gt_annotations_loaded": 0,
+      "new_global_ids": [
+        206
+      ],
+      "old_global_ids": [],
+      "seen_global_ids": [
+        206
+      ],
+      "stage": "s0",
+      "status": "AUDITED_PARTIAL_SOURCE",
+      "train": {
+        "eligible_videos_have_new_gt": true,
+        "frames": 30439,
+        "gt_annotations_by_class": {
+          "car": 273821
+        },
+        "hidden_old_gt_annotations_loaded": 0,
+        "source_videos": 154,
+        "view_manifest_sha256": "e352f946e1e2b95610f77d55e411fc80bcfe95c98fe266b2c985d23844a037bf"
+      },
+      "val": {
+        "eligible_videos_have_new_gt": true,
+        "frames": 7286,
+        "gt_annotations_by_class": {
+          "car": 68813
+        },
+        "hidden_old_gt_annotations_loaded": 0,
+        "source_videos": 36,
+        "view_manifest_sha256": "20613d7920363241aefcc9a62cfb688b1c0a42a2ddd99620f1ba1d6106087b83"
+      }
+    },
+    "s1": {
+      "gt_replay": 0,
+      "hidden_old_gt_annotations_loaded": 0,
+      "new_global_ids": [
+        792
+      ],
+      "old_global_ids": [
+        206
+      ],
+      "seen_global_ids": [
+        206,
+        792
+      ],
+      "stage": "s1",
+      "status": "AUDITED_PARTIAL_SOURCE",
+      "train": {
+        "eligible_videos_have_new_gt": true,
+        "frames": 22845,
+        "gt_annotations_by_class": {
+          "car": 0,
+          "pedestrian": 46392
+        },
+        "hidden_old_gt_annotations_loaded": 0,
+        "source_videos": 116,
+        "view_manifest_sha256": "1d2b55c38bde346cc047c0738776ea355c50a30d39c2ffd2c97b0b47d37ef110"
+      },
+      "val": {
+        "eligible_videos_have_new_gt": true,
+        "frames": 7286,
+        "gt_annotations_by_class": {
+          "car": 68813,
+          "pedestrian": 7628
+        },
+        "hidden_old_gt_annotations_loaded": 0,
+        "source_videos": 36,
+        "view_manifest_sha256": "8ba62f12515bed0edbd90407da09df6b54e4c02681addf31a0616430711a5510"
+      }
+    },
+    "s2": {
+      "gt_replay": 0,
+      "hidden_old_gt_annotations_loaded": 0,
+      "new_global_ids": [
+        1122
+      ],
+      "old_global_ids": [
+        206,
+        792
+      ],
+      "seen_global_ids": [
+        206,
+        792,
+        1122
+      ],
+      "stage": "s2",
+      "status": "AUDITED_PARTIAL_SOURCE",
+      "train": {
+        "eligible_videos_have_new_gt": true,
+        "frames": 25916,
+        "gt_annotations_by_class": {
+          "car": 0,
+          "pedestrian": 0,
+          "truck": 25380
+        },
+        "hidden_old_gt_annotations_loaded": 0,
+        "source_videos": 130,
+        "view_manifest_sha256": "f12548f13551ffc925343cd1127e2b25a7443c9faea2dc548da742bf8859c66c"
+      },
+      "val": {
+        "eligible_videos_have_new_gt": true,
+        "frames": 7286,
+        "gt_annotations_by_class": {
+          "car": 68813,
+          "pedestrian": 7628,
+          "truck": 1917
+        },
+        "hidden_old_gt_annotations_loaded": 0,
+        "source_videos": 36,
+        "view_manifest_sha256": "c0171794ee5826fbaddd83495e8a0bfb45dd77ebe7afd63b5406ba879d41db57"
+      }
+    }
+  }
+}

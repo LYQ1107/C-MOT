@@ -370,7 +370,7 @@ class OVFrameMatcher(SetCriterion):
         for batch_index in range(batch):
             meta = frame_metadata[batch_index] if batch_index < len(frame_metadata) else {}
             exhaustive = meta.get("exhaustive_global_ids", meta.get("supervised_global_ids", []))
-            if label_mode == "complete" and not exhaustive:
+            if label_mode in ("complete", "cooler_complete_seen") and not exhaustive:
                 exhaustive = meta.get("active_global_ids", [])
             for global_id in exhaustive:
                 columns_for_id = (select_id == int(global_id)).nonzero(as_tuple=False).flatten()
@@ -902,7 +902,7 @@ class OVFrameMatcher(SetCriterion):
                 gt_counts.append(0)
                 continue
             exhaustive = meta.get("exhaustive_global_ids", meta.get("supervised_global_ids", []))
-            if label_mode == "complete" and not exhaustive:
+            if label_mode in ("complete", "cooler_complete_seen") and not exhaustive:
                 exhaustive = meta.get("active_global_ids", [])
             for global_id in exhaustive:
                 match = (select_id == int(global_id)).nonzero(as_tuple=False).flatten()
@@ -942,6 +942,13 @@ class OVFrameMatcher(SetCriterion):
                     # A PL row is a positive for its own class only.  It is
                     # never a universal negative for other active classes.
                     target[batch_index, source_index, column] = 1.0
+                    if label_mode == "cooler_complete_seen":
+                        # Complete-seen negatives cover the frame, but the
+                        # PL positive itself belongs only to the PL source
+                        # numerator.  Avoid counting that cell in both
+                        # source losses while retaining other class-negative
+                        # cells for the same query.
+                        gt_mask[batch_index, source_index, column] = False
                     pl_mask[batch_index, source_index, column] = True
                     value = float(gt_instances[batch_index].label_weights[target_index].detach().item()) if gt_instances[batch_index].has("label_weights") else 1.0
                     pl_weights[batch_index, source_index, column] = max(0.0, min(1.0, value))
@@ -1205,6 +1212,7 @@ class OVTR(nn.Module):
             "birth_count": 0,
             "keep_count": 0,
             "export_count": 0,
+            "pseudo_exclusion_rejected_count": 0,
         }
         self.patch2query = nn.Linear(512, 256)
         self.all_ids = torch.tensor(range(self.text_embeddings.shape[-1]))
@@ -1558,6 +1566,45 @@ class OVTR(nn.Module):
             return self._advance_history_motion_references(track_instances, current_timestamp_s)
         raise ValueError("unknown C-MOT motion mode: %s" % self.motion_mode)
 
+    def _pseudo_generation_exclusion_mask(self, track_instances, frame_context):
+        """Suppress old-class candidates overlapping current new-class GT.
+
+        This is intentionally evaluated after semantic assignment and before
+        ``RuntimeTrackerBase.update``.  Existing tracks remain in the state;
+        the mask only makes the current detection an unobserved frame, which
+        matches COOLer's detector-before-tracker filtering semantics.
+        """
+        context = frame_context or {}
+        if not bool(context.get("pseudo_generation", False)):
+            return torch.zeros(len(track_instances), dtype=torch.bool, device=track_instances.pred_boxes.device)
+        old_ids = [int(value) for value in context.get("pseudo_old_global_ids", [])]
+        raw_boxes = context.get("pseudo_exclusion_boxes_cxcywh")
+        if not old_ids or raw_boxes is None:
+            return torch.zeros(len(track_instances), dtype=torch.bool, device=track_instances.pred_boxes.device)
+        if torch.is_tensor(raw_boxes):
+            exclusion = raw_boxes.to(device=track_instances.pred_boxes.device, dtype=track_instances.pred_boxes.dtype)
+        else:
+            exclusion = torch.as_tensor(raw_boxes, device=track_instances.pred_boxes.device, dtype=track_instances.pred_boxes.dtype)
+        if exclusion.numel() == 0:
+            return torch.zeros(len(track_instances), dtype=torch.bool, device=track_instances.pred_boxes.device)
+        exclusion = exclusion.reshape(-1, 4)
+        predicted = box_ops.box_cxcywh_to_xyxy(track_instances.pred_boxes[:, :4]).clamp(0, 1)
+        target = box_ops.box_cxcywh_to_xyxy(exclusion).clamp(0, 1)
+        lt = torch.maximum(predicted[:, None, :2], target[None, :, :2])
+        rb = torch.minimum(predicted[:, None, 2:], target[None, :, 2:])
+        wh = (rb - lt).clamp(min=0)
+        inter = wh[..., 0] * wh[..., 1]
+        area_pred = (predicted[:, 2] - predicted[:, 0]).clamp(min=0) * (predicted[:, 3] - predicted[:, 1]).clamp(min=0)
+        area_target = (target[:, 2] - target[:, 0]).clamp(min=0) * (target[:, 3] - target[:, 1]).clamp(min=0)
+        iou = inter / (area_pred[:, None] + area_target[None, :] - inter).clamp(min=1e-8)
+        threshold = float(context.get("pseudo_exclusion_iou", 0.5))
+        old_mask = torch.zeros(len(track_instances), dtype=torch.bool, device=track_instances.pred_boxes.device)
+        for global_id in old_ids:
+            old_mask |= track_instances.cls_idxes == int(global_id)
+        rejected = old_mask & (iou.max(dim=1).values >= threshold)
+        self.runtime_stats["pseudo_exclusion_rejected_count"] += int(rejected.sum().item())
+        return rejected
+
     def consume_runtime_stats(self):
         value = dict(self.runtime_stats)
         self.runtime_stats = {key: 0 for key in self.runtime_stats}
@@ -1747,8 +1794,6 @@ class OVTR(nn.Module):
             frame_res['track_instances'] = track_instances
             track_instances = self.criterion.match_for_single_frame(frame_res, is_first)
         else:
-            _track_discard = torch.zeros(
-                0, dtype=torch.long, device=track_instances.scores.device)
             # Resolve global semantic IDs before duplicate protection; the
             # protection rule is same-class only and must not use the
             # initial -1 placeholders.
@@ -1766,6 +1811,7 @@ class OVTR(nn.Module):
                     merge_existing_ids=self.merge_existing_ids,
                 )
                 self.runtime_stats["suppressed_duplicate_count"] += int(dedup_stats.get("suppressed", 0))
+            _track_discard = self._pseudo_generation_exclusion_mask(track_instances, frame_context)
             # each track will be assigned an unique global id by the track base.
             if is_first:
                 self.track_base.clear()

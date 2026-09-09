@@ -1,0 +1,96 @@
+project: C-MOT
+schema_version: cmot.cooler_compat.v1
+seed: 777
+
+network:
+  require_route_audit: true
+  fallback_to_proxy: false
+
+resources:
+  protected_gpu_ids: [2, 3, 4]
+  max_gpus: 1
+  dataloader_workers_per_trainer: 0
+
+protocol:
+  name: bdd100k_cooler_most_to_least_s0_s2
+  class_order:
+    - [car]
+    - [pedestrian]
+    - [truck]
+  replay_free: true
+  previous_training_data_forbidden: true
+  full_train_split: true
+  full_validation_split: true
+  expected_train_videos: 1400
+  expected_val_videos: 200
+  train_source_cap: null
+  eval_video_cap: null
+  train_split: train
+  eval_split: val
+  reference_scope: 3
+  num_ref_imgs: 1
+  skip_nomatch_samples: true
+  nominal_epoch_length: all_selected_train_frames
+  new_gt_exclusion_iou: 0.5
+
+training:
+  optimizer: AdamW
+  batch_size_per_gpu: 1
+  gradient_accumulation_steps: 16
+  epochs: 6
+  workers: 0
+  input_size: [1280, 720]
+  lr_backbone: 0.000002
+  lr_heads: 0.00002
+  weight_decay: 0.0001
+  max_grad_norm: 0.1
+  lr_decay_milestones: [4, 5]
+  lr_decay_gamma: 0.1
+
+augmentation:
+  horizontal_flip_probability: 0.5
+  pair_consistent_flip: true
+
+motion:
+  enabled: false
+  implementation: none
+  mode: none
+
+supervision:
+  lambda_gt: 1.0
+  lambda_pl: 1.0
+  pl_warmup_steps: 0
+  label_mode: cooler_complete_seen
+
+pseudo:
+  policy_version: cooler_track_pl_v1
+  old_gt_calibration: false
+  exclusion_iou_with_new_gt: 0.5
+  total_segment_cap: null
+  total_frame_cap: null
+  per_class_segment_cap: null
+  min_segment_frames: 1
+
+distillation:
+  enabled: false
+
+inference:
+  birth_threshold: 0.50
+  keep_threshold: 0.20
+  export_threshold: 0.50
+  miss_tolerance: 5
+  duplicate_iou: 0.85
+  duplicate_feature_cos: 0.95
+  maximum_quantity: 160
+  inference_dedup_enabled: true
+
+evaluation:
+  classes: [car, pedestrian, truck]
+  hota_thresholds: 19
+  aggregation: class_average_and_detection_average
+  full_validation: true
+
+report:
+  redact_private_paths: true
+  allow_estimated_metrics: false
+  require_raw_metrics: true

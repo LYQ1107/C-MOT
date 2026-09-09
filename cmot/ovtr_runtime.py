@@ -69,7 +69,9 @@ def make_model(
     distillation_cfg = dict(resolved.get("distillation", {}))
     if resolved:
         motion_mode = str(motion_cfg.get("mode", motion_mode))
-        label_mode = "partial" if str(resolved.get("stage", "")).startswith("S1") or str(resolved.get("stage", "")).startswith("S2") else label_mode
+        stage_name = str(resolved.get("stage", ""))
+        if (stage_name.startswith("S1") or stage_name.startswith("S2")) and label_mode != "cooler_complete_seen":
+            label_mode = "partial"
         score_threshold = float(inference_cfg.get("birth_threshold", inference_cfg.get("score_threshold", score_threshold)))
         filter_threshold = float(inference_cfg.get("keep_threshold", inference_cfg.get("filter_threshold", filter_threshold)))
         miss_tolerance = int(inference_cfg.get("miss_tolerance", miss_tolerance))

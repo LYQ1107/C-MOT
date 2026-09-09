@@ -16,7 +16,6 @@ from typing import Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
-from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from .manifest import canonical_json_hash, sha256_file, write_json
@@ -148,6 +147,32 @@ def _optimizer(model, resolved: Mapping[str, object]):
     }
 
 
+def _clip_optimizer_groups(optimizer, max_grad_norm: float) -> dict:
+    """Clip base and motion parameter groups independently.
+
+    The old single call over ``model.parameters()`` made an optional motion
+    head change the clipping scale of the detector/tracker.  Optimizer groups
+    are the authoritative membership here; KD/teacher parameters are not
+    present in the student optimizer and therefore cannot be clipped.
+    """
+    buckets = {"base": [], "motion": []}
+    for group in optimizer.param_groups:
+        group_name = str(group.get("group_name", "heads"))
+        bucket = "motion" if group_name == "motion" else "base"
+        buckets[bucket].extend(
+            parameter for parameter in group.get("params", [])
+            if parameter.grad is not None
+        )
+    result = {}
+    for bucket, parameters in buckets.items():
+        if not parameters:
+            result[bucket + "_grad_norm"] = 0.0
+            continue
+        norm = torch.nn.utils.clip_grad_norm_(parameters, float(max_grad_norm))
+        result[bucket + "_grad_norm"] = float(norm.detach().item())
+    return result
+
+
 def _exposure_update(exposure: dict, batch: dict) -> None:
     sample = batch.get("sample_metadata", {})
     stream = str(sample.get("stream", "current"))
@@ -275,7 +300,9 @@ def train(
         clip_len = int(training_cfg.get("clip_frames", clip_len))
         input_size = tuple(int(v) for v in training_cfg.get("input_size", input_size))
         motion_mode = str(dict(resolved.get("motion", {})).get("mode", motion_mode))
-        label_mode = "partial" if str(resolved.get("stage", "")).startswith(("S1", "S2")) else label_mode
+        stage_name = str(resolved.get("stage", ""))
+        if stage_name.startswith(("S1", "S2")) and label_mode != "cooler_complete_seen":
+            label_mode = "partial"
         seed = int(resolved.get("seed", seed))
     random.seed(seed)
     np.random.seed(seed)
@@ -569,7 +596,8 @@ def train(
                 raise FloatingPointError(
                     "non-finite gradients at step %d: %s" % (step, nonfinite_gradients[:8])
                 )
-            gradient_norm = float(clip_grad_norm_(model.parameters(), max_grad_norm).item())
+            gradient_clipping = _clip_optimizer_groups(optimizer, max_grad_norm)
+            gradient_norm = float(gradient_clipping["base_grad_norm"])
             audit_before = _select_audit_parameters(model) if step in audit_steps else {}
             optimizer.step()
             parameter_audit = _gradient_audit(model, audit_before) if audit_before else {}
@@ -580,6 +608,7 @@ def train(
                 "step": step,
                 "loss": float(loss.detach().item()),
                 "gradient_norm_before_clip": gradient_norm,
+                "gradient_clipping": gradient_clipping,
                 "weighted_loss_names": sorted(raw_terms),
                 "losses": raw_terms,
                 "parameter_audit": parameter_audit,

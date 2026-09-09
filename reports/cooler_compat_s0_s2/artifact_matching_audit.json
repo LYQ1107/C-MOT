@@ -1,0 +1,45 @@
+{
+  "cmot_base_commit": "d226b9ec239f597f01f8db4e78d7cce8013d6067",
+  "cmot_base_commit_verified": true,
+  "cooler_reference_commit": "8adfd12334292011477a587aae8d56be4b28da8d",
+  "cooler_reference_local_status": "NOT_FOUND_LOCAL_NO_DOWNLOAD",
+  "credential_values_recorded": false,
+  "downloads": "NOT_RUN_no_new_data_or_dependency_download",
+  "expected_foundation_sha256": "0862cac87ad50f58a01ce17d4e44af0468ad8639cfccd18d66d2e9b2570d839e",
+  "foundation": {
+    "basename": "ovtr_det_pretrain.pth",
+    "bytes": 226367693,
+    "exists": true,
+    "is_file": true,
+    "sha256": "0862cac87ad50f58a01ce17d4e44af0468ad8639cfccd18d66d2e9b2570d839e"
+  },
+  "foundation_hash_match": true,
+  "image_embedding": {
+    "basename": "clip_image_embedding_all.pt",
+    "bytes": 2464491,
+    "exists": true,
+    "is_file": true,
+    "sha256": "67b62ec6ced166c7b7e9480837e6c85b177a974815ac691270c7fbedea7da2b5"
+  },
+  "ovtr_config": {
+    "basename": "ovtr_5_frame_train_val.py",
+    "bytes": 6869,
+    "exists": true,
+    "is_file": true,
+    "sha256": "7fe2642b60662d8a8eb1ad259be29678a665c925867db2ab3e251cdcfb57ff29"
+  },
+  "proxy_values_recorded": false,
+  "schema_version": "cmot.cooler_compat.artifact_audit.v1",
+  "text_embedding": {
+    "basename": "iou_neg5_ens.pth",
+    "bytes": 2464504,
+    "exists": true,
+    "is_file": true,
+    "sha256": "37544c96ff650cd4be4b794c763d33c9f8c7fee86ad8fde85225a3521b3a8d37"
+  },
+  "trackeval": {
+    "basename": "TrackEval",
+    "exists": true,
+    "is_file": false
+  }
+}

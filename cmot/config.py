@@ -8,7 +8,7 @@ import yaml
 
 ALLOWED_KEYS = {
     "project", "schema_version", "seed", "network", "resources", "protocol",
-    "training", "motion", "replay", "report", "supervision", "pseudo",
+    "training", "augmentation", "motion", "replay", "report", "supervision", "pseudo",
     "calibration", "distillation", "inference", "evaluation", "diagnosis",
 }
 
@@ -54,6 +54,43 @@ V4_NESTED_KEYS["motion"].update({
     "history_length", "history_hidden_dim", "num_modes", "semantic_dim",
     "min_history_points", "detach_history", "reference_enabled",
 })
+
+# COOLer compatibility is intentionally a separate contract.  In particular,
+# it must not inherit V3/V4 replay, calibration, motion, or pilot caps through
+# permissive defaults.  Keep the key set explicit so a typo cannot silently
+# change the protocol.
+COOLER_NESTED_KEYS = {
+    "network": {"require_route_audit", "fallback_to_proxy"},
+    "resources": {"protected_gpu_ids", "max_gpus", "dataloader_workers_per_trainer"},
+    "protocol": {
+        "name", "class_order", "replay_free", "previous_training_data_forbidden",
+        "full_train_split", "full_validation_split", "expected_train_videos",
+        "expected_val_videos", "train_source_cap", "eval_video_cap", "train_split",
+        "eval_split", "reference_scope", "num_ref_imgs", "skip_nomatch_samples",
+        "nominal_epoch_length", "new_gt_exclusion_iou",
+    },
+    "training": {
+        "optimizer", "batch_size_per_gpu", "gradient_accumulation_steps", "epochs",
+        "workers", "input_size", "lr_backbone", "lr_heads", "weight_decay",
+        "max_grad_norm", "lr_decay_milestones", "lr_decay_gamma",
+    },
+    "augmentation": {"horizontal_flip_probability", "pair_consistent_flip"},
+    "motion": {"enabled", "implementation", "mode"},
+    "supervision": {"lambda_gt", "lambda_pl", "pl_warmup_steps", "label_mode"},
+    "pseudo": {
+        "policy_version", "old_gt_calibration", "exclusion_iou_with_new_gt",
+        "total_segment_cap", "total_frame_cap", "per_class_segment_cap",
+        "min_segment_frames",
+    },
+    "distillation": {"enabled"},
+    "inference": {
+        "birth_threshold", "keep_threshold", "export_threshold", "miss_tolerance",
+        "duplicate_iou", "duplicate_feature_cos", "maximum_quantity",
+        "inference_dedup_enabled",
+    },
+    "evaluation": {"classes", "hota_thresholds", "aggregation", "full_validation"},
+    "report": {"redact_private_paths", "allow_estimated_metrics", "require_raw_metrics"},
+}
 
 
 def _validate_nested(value: dict, allowed: Mapping[str, set], label: str) -> None:
@@ -113,6 +150,155 @@ def _validate_v4(value: dict) -> None:
         raise ValueError("continual_v4 inference thresholds must be probabilities")
 
 
+def _validate_cooler(value: dict) -> None:
+    _validate_nested(value, COOLER_NESTED_KEYS, "cooler_compat")
+    protocol = value.get("protocol", {})
+    expected_order = [["car"], ["pedestrian"], ["truck"]]
+    if protocol.get("class_order") != expected_order:
+        raise ValueError("cooler_compat class_order must be car -> pedestrian -> truck")
+    for key in ("replay_free", "previous_training_data_forbidden", "full_train_split", "full_validation_split"):
+        if protocol.get(key) is not True:
+            raise ValueError("cooler_compat protocol.%s must be true" % key)
+    if int(protocol.get("expected_train_videos", 0)) != 1400 or int(protocol.get("expected_val_videos", 0)) != 200:
+        raise ValueError("cooler_compat requires expected BDD counts 1400/200")
+    if protocol.get("train_source_cap") is not None or protocol.get("eval_video_cap") is not None:
+        raise ValueError("cooler_compat does not permit train/eval caps")
+    if int(protocol.get("reference_scope", 0)) != 3 or int(protocol.get("num_ref_imgs", 0)) != 1:
+        raise ValueError("cooler_compat reference sampler must be scope=3 and num_ref_imgs=1")
+    if protocol.get("skip_nomatch_samples") is not True:
+        raise ValueError("cooler_compat requires skip_nomatch_samples")
+    training = value.get("training", {})
+    if str(training.get("optimizer", "")) != "AdamW":
+        raise ValueError("cooler_compat uses the architecture-native AdamW optimizer")
+    if int(training.get("epochs", 0)) != 6 or int(training.get("gradient_accumulation_steps", 0)) != 16:
+        raise ValueError("cooler_compat requires 6 epochs and accumulation=16")
+    if [int(v) for v in training.get("input_size", [])] != [1280, 720]:
+        raise ValueError("cooler_compat input_size must be [1280, 720] (width,height)")
+    if [int(v) for v in training.get("lr_decay_milestones", [])] != [4, 5]:
+        raise ValueError("cooler_compat LR milestones must be [4,5]")
+    augmentation = value.get("augmentation", {})
+    if abs(float(augmentation.get("horizontal_flip_probability", -1.0)) - 0.5) > 1e-9:
+        raise ValueError("cooler_compat horizontal flip probability must be 0.5")
+    if augmentation.get("pair_consistent_flip") is not True:
+        raise ValueError("cooler_compat requires pair-consistent flip")
+    motion = value.get("motion", {})
+    if motion.get("enabled", False) or motion.get("implementation", "none") != "none" or motion.get("mode", "none") != "none":
+        raise ValueError("cooler_compat motion must be disabled")
+    supervision = value.get("supervision", {})
+    if str(supervision.get("label_mode", "")) != "cooler_complete_seen":
+        raise ValueError("cooler_compat requires cooler_complete_seen labels")
+    if float(supervision.get("lambda_gt", -1.0)) != 1.0 or float(supervision.get("lambda_pl", -1.0)) != 1.0:
+        raise ValueError("cooler_compat GT/PL weights must both be 1.0")
+    if int(supervision.get("pl_warmup_steps", -1)) != 0:
+        raise ValueError("cooler_compat PL warmup must be zero")
+    pseudo = value.get("pseudo", {})
+    if str(pseudo.get("policy_version", "")) != "cooler_track_pl_v1":
+        raise ValueError("cooler_compat pseudo policy must be cooler_track_pl_v1")
+    if pseudo.get("old_gt_calibration") is not False:
+        raise ValueError("cooler_compat forbids old-GT calibration")
+    for key in ("total_segment_cap", "total_frame_cap", "per_class_segment_cap"):
+        if pseudo.get(key) is not None:
+            raise ValueError("cooler_compat pseudo.%s must be null" % key)
+    if value.get("distillation", {}).get("enabled") is not False:
+        raise ValueError("cooler_compat distillation must be disabled")
+    inference = value.get("inference", {})
+    required = ("birth_threshold", "keep_threshold", "export_threshold", "miss_tolerance", "duplicate_iou", "duplicate_feature_cos")
+    missing = [key for key in required if key not in inference]
+    if missing:
+        raise ValueError("cooler_compat inference contract missing: %s" % ",".join(missing))
+    for key in ("birth_threshold", "keep_threshold", "export_threshold", "duplicate_iou", "duplicate_feature_cos"):
+        if not 0.0 <= float(inference[key]) <= 1.0:
+            raise ValueError("cooler_compat inference.%s must be a probability" % key)
+    if value.get("report", {}).get("allow_estimated_metrics") is not False:
+        raise ValueError("cooler_compat reports cannot use estimated metrics")
+
+
+def _cooler_stage_ids(stage: str) -> dict:
+    stages = {
+        "s0": {"active_names": ["car"], "new_names": ["car"], "old_names": []},
+        "s1": {"active_names": ["car", "pedestrian"], "new_names": ["pedestrian"], "old_names": ["car"]},
+        "s2": {"active_names": ["car", "pedestrian", "truck"], "new_names": ["truck"], "old_names": ["car", "pedestrian"]},
+        "oracle_s2": {"active_names": ["car", "pedestrian", "truck"], "new_names": ["car", "pedestrian", "truck"], "old_names": []},
+    }
+    key = str(stage).lower()
+    if key not in stages:
+        raise ValueError("unknown cooler stage %s" % stage)
+    return dict(stages[key])
+
+
+def resolve_cooler_runtime_config(curriculum: dict, runtime_paths: Mapping[str, Any], stage: str) -> dict:
+    """Materialize the independent COOLer-compatible runtime contract."""
+    _validate_cooler(curriculum)
+    from .class_registry import tao_bdd_registry
+
+    result = _copy_sections(curriculum)
+    stage_ids = _cooler_stage_ids(stage)
+    registry = tao_bdd_registry()
+    active_ids = [registry.classes[name].global_semantic_id for name in stage_ids["active_names"]]
+    new_ids = [registry.classes[name].global_semantic_id for name in stage_ids["new_names"]]
+    old_ids = [registry.classes[name].global_semantic_id for name in stage_ids["old_names"]]
+    stage_key = str(stage).lower()
+    method_names = {
+        "s0": "CMOT-COOLER-S0",
+        "s1": "CMOT-COOLER-S1",
+        "s2": "CMOT-COOLER-S2",
+        "oracle_s2": "CMOT-ORACLE-S2",
+    }
+    result.update({
+        "runtime_paths": dict(runtime_paths),
+        "stage": stage_key,
+        "method": method_names[stage_key],
+        "protocol_role": "oracle" if stage_key == "oracle_s2" else "cooler_cil",
+        "active_global_ids": active_ids,
+        "new_global_ids": new_ids,
+        "old_global_ids": old_ids,
+        "label_mode": "cooler_complete_seen",
+        "enable_pl": stage_key in ("s1", "s2"),
+        "enable_kd": False,
+        "enable_motion": False,
+    })
+    training = dict(result.get("training", {}))
+    training["input_size"] = [1280, 720]
+    result["training"] = training
+    supervision = dict(result.get("supervision", {}))
+    supervision.update({"lambda_gt": 1.0, "lambda_pl": 1.0, "pl_warmup_steps": 0, "label_mode": "cooler_complete_seen"})
+    result["supervision"] = supervision
+    motion = dict(result.get("motion", {}))
+    motion.update({"enabled": False, "implementation": "none", "mode": "none"})
+    result["motion"] = motion
+    distillation = dict(result.get("distillation", {}))
+    distillation["enabled"] = False
+    result["distillation"] = distillation
+    inference = dict(result.get("inference", {}))
+    inference.setdefault("maximum_quantity", 160)
+    inference.setdefault("inference_dedup_enabled", True)
+    result["inference"] = inference
+    result["actual_consumers"] = {
+        "schema_version": "cmot.cooler_compat.runtime.v1",
+        "stage": result["stage"],
+        "active_global_ids": active_ids,
+        "new_global_ids": new_ids,
+        "old_global_ids": old_ids,
+        "label_mode": result["label_mode"],
+        "motion": {"enabled": False, "implementation": "none", "mode": "none"},
+        "replay": {"enabled": False, "gt_replay": 0},
+        "distillation": {"enabled": False},
+        "training": {
+            "epochs": int(training["epochs"]),
+            "gradient_accumulation_steps": int(training["gradient_accumulation_steps"]),
+            "input_size": list(training["input_size"]),
+            "lr_decay_milestones": list(training["lr_decay_milestones"]),
+        },
+        "sampling": {
+            "reference_scope": int(result["protocol"]["reference_scope"]),
+            "num_ref_imgs": int(result["protocol"]["num_ref_imgs"]),
+            "skip_nomatch_samples": True,
+            "seed": int(result.get("seed", 777)),
+        },
+    }
+    return result
+
+
 def load_config(path: str) -> dict:
     with Path(path).open("r", encoding="utf-8") as handle:
         value = yaml.safe_load(handle)
@@ -130,6 +316,8 @@ def load_config(path: str) -> dict:
         _validate_v3(value)
     elif schema == "cmot.continual_v4":
         _validate_v4(value)
+    elif schema == "cmot.cooler_compat.v1":
+        _validate_cooler(value)
     elif schema == "cmot.curriculum.v1":
         _validate_nested(value, V2_NESTED_KEYS, "curriculum")
     else:
@@ -198,6 +386,8 @@ def resolve_runtime_config(curriculum: dict, runtime_paths: Mapping[str, Any], m
         _validate_v3(curriculum)
     elif schema == "cmot.continual_v4":
         _validate_v4(curriculum)
+    elif schema == "cmot.cooler_compat.v1":
+        return resolve_cooler_runtime_config(curriculum, runtime_paths, stage)
     else:
         raise ValueError("resolve_runtime_config requires a V2, V3 or V4 curriculum")
     resolved = _copy_sections(curriculum)

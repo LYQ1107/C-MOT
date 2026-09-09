@@ -1,0 +1,3 @@
+- Local BDD source did not contain the required 1400 train / 200 val annotated videos.
+- COOLer reference commit was not downloaded or found locally; no new download was attempted.
+- Consequently no checkpoint, prediction, TrackEval metric, gap, or diagnosis was generated; these remain NOT_RUN/null.

@@ -45,7 +45,7 @@ def infer_checkpoint(
         device,
         clip_len=int(dict(resolved.get("training", {})).get("clip_frames", 4)),
         motion_mode=str(dict(resolved.get("motion", {})).get("mode", "none")),
-        label_mode="partial" if str(resolved.get("stage", "")).startswith(("S1", "S2")) else "complete",
+        label_mode=str(resolved.get("label_mode", "partial" if str(resolved.get("stage", "")).startswith(("S1", "S2")) else "complete")),
         score_threshold=float(inference_cfg.get("birth_threshold", inference_cfg.get("score_threshold", 0.19))),
         filter_threshold=float(inference_cfg.get("keep_threshold", inference_cfg.get("filter_threshold", 0.19))),
         miss_tolerance=int(inference_cfg.get("miss_tolerance", 5)),

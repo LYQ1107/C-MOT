@@ -1,0 +1,138 @@
+{
+  "effective_pairs_seen": 0,
+  "epochs_requested": 6,
+  "micro_batches_seen": 0,
+  "optimizer_steps": 0,
+  "runs": {
+    "oracle_s2": {
+      "active_global_ids": [
+        206,
+        792,
+        1122
+      ],
+      "checkpoint": null,
+      "checkpoint_sha256": null,
+      "epochs_completed": 0,
+      "execution_status": "NOT_RUN",
+      "exposure": {
+        "gt_replay": 0,
+        "old_real_gt_boxes": 0,
+        "pseudo_boxes": 0,
+        "pseudo_tracks": 0,
+        "replay_boxes": 0
+      },
+      "method": "CMOT-ORACLE-S2",
+      "metrics": "NOT_RUN",
+      "micro_batches_seen": 0,
+      "new_global_ids": [
+        206,
+        792,
+        1122
+      ],
+      "old_global_ids": [],
+      "optimizer_steps": 0,
+      "raw_metrics": null,
+      "raw_prediction": null,
+      "reason": "BLOCKED_FULL_BDD_MISSING",
+      "scope": "NOT_RUN",
+      "stage": "oracle_s2"
+    },
+    "s0": {
+      "active_global_ids": [
+        206
+      ],
+      "checkpoint": null,
+      "checkpoint_sha256": null,
+      "epochs_completed": 0,
+      "execution_status": "NOT_RUN",
+      "exposure": {
+        "gt_replay": 0,
+        "old_real_gt_boxes": 0,
+        "pseudo_boxes": 0,
+        "pseudo_tracks": 0,
+        "replay_boxes": 0
+      },
+      "method": "CMOT-COOLER-S0",
+      "metrics": "NOT_RUN",
+      "micro_batches_seen": 0,
+      "new_global_ids": [
+        206
+      ],
+      "old_global_ids": [],
+      "optimizer_steps": 0,
+      "raw_metrics": null,
+      "raw_prediction": null,
+      "reason": "BLOCKED_FULL_BDD_MISSING",
+      "scope": "NOT_RUN",
+      "stage": "s0"
+    },
+    "s1": {
+      "active_global_ids": [
+        206,
+        792
+      ],
+      "checkpoint": null,
+      "checkpoint_sha256": null,
+      "epochs_completed": 0,
+      "execution_status": "NOT_RUN",
+      "exposure": {
+        "gt_replay": 0,
+        "old_real_gt_boxes": 0,
+        "pseudo_boxes": 0,
+        "pseudo_tracks": 0,
+        "replay_boxes": 0
+      },
+      "method": "CMOT-COOLER-S1",
+      "metrics": "NOT_RUN",
+      "micro_batches_seen": 0,
+      "new_global_ids": [
+        792
+      ],
+      "old_global_ids": [
+        206
+      ],
+      "optimizer_steps": 0,
+      "raw_metrics": null,
+      "raw_prediction": null,
+      "reason": "BLOCKED_FULL_BDD_MISSING",
+      "scope": "NOT_RUN",
+      "stage": "s1"
+    },
+    "s2": {
+      "active_global_ids": [
+        206,
+        792,
+        1122
+      ],
+      "checkpoint": null,
+      "checkpoint_sha256": null,
+      "epochs_completed": 0,
+      "execution_status": "NOT_RUN",
+      "exposure": {
+        "gt_replay": 0,
+        "old_real_gt_boxes": 0,
+        "pseudo_boxes": 0,
+        "pseudo_tracks": 0,
+        "replay_boxes": 0
+      },
+      "method": "CMOT-COOLER-S2",
+      "metrics": "NOT_RUN",
+      "micro_batches_seen": 0,
+      "new_global_ids": [
+        1122
+      ],
+      "old_global_ids": [
+        206,
+        792
+      ],
+      "optimizer_steps": 0,
+      "raw_metrics": null,
+      "raw_prediction": null,
+      "reason": "BLOCKED_FULL_BDD_MISSING",
+      "scope": "NOT_RUN",
+      "stage": "s2"
+    }
+  },
+  "schema_version": "cmot.cooler_compat.training_audit.v1",
+  "status": "BLOCKED_FULL_BDD_MISSING"
+}

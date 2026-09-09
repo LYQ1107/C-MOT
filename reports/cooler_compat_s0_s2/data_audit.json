@@ -1,0 +1,71 @@
+{
+  "annotation_video_count_train": 154,
+  "annotation_video_count_val": 36,
+  "artifact_audit": {
+    "config_file": {
+      "basename": "ovtr_5_frame_train_val.py",
+      "bytes": 6869,
+      "exists": true,
+      "is_file": true
+    },
+    "credential_values_recorded": false,
+    "foundation_checkpoint": {
+      "basename": "ovtr_det_pretrain.pth",
+      "bytes": 226367693,
+      "exists": true,
+      "is_file": true,
+      "sha256": "0862cac87ad50f58a01ce17d4e44af0468ad8639cfccd18d66d2e9b2570d839e"
+    },
+    "foundation_hash_match": true,
+    "image_embedding": {
+      "basename": "clip_image_embedding_all.pt",
+      "bytes": 2464491,
+      "exists": true,
+      "is_file": true,
+      "sha256": "67b62ec6ced166c7b7e9480837e6c85b177a974815ac691270c7fbedea7da2b5"
+    },
+    "proxy_values_recorded": false,
+    "text_embedding": {
+      "basename": "iou_neg5_ens.pth",
+      "bytes": 2464504,
+      "exists": true,
+      "is_file": true,
+      "sha256": "37544c96ff650cd4be4b794c763d33c9f8c7fee86ad8fde85225a3521b3a8d37"
+    },
+    "trackeval_root": {
+      "basename": "TrackEval",
+      "exists": true,
+      "is_file": false
+    }
+  },
+  "blockers": [
+    "BDD_ANNOTATION_VIDEO_COUNT_MISMATCH",
+    "BLOCKED_FULL_BDD_MISSING"
+  ],
+  "downloads": "NOT_RUN_no_new_data_or_dependency_download",
+  "expected": {
+    "train_videos": 1400,
+    "val_videos": 200
+  },
+  "full_bdd_gate_passed": false,
+  "image_audit": {
+    "missing_referenced_frames": 0,
+    "referenced_frames": 37725,
+    "root_present": true
+  },
+  "runtime_basename": "runtime_v4_history_dynamics.json",
+  "schema_version": "cmot.cooler_compat.data_audit.v1",
+  "source": {
+    "basename": "bdd100k_mot_local.json",
+    "kind": "cmot_manifest",
+    "manifest_hash": "de77586b829f6b8e99ca679e96f7227c882537e4fdfab70dbeb10396bab71dc0",
+    "sha256": "97eb54211c9ce783baf96e8852ec84a8413f4fee80adc7c3d2b9608b12775fcd"
+  },
+  "status": "BLOCKED_FULL_BDD_MISSING",
+  "train_annotation_count": 345593,
+  "train_frame_count": 30439,
+  "train_video_count": 154,
+  "val_annotation_count": 78358,
+  "val_frame_count": 7286,
+  "val_video_count": 36
+}
