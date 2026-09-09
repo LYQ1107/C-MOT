@@ -29,7 +29,16 @@ from .segmentation import sigmoid_focal_loss
 from util.clip_utils import load_embeddings
 from .utils import MLP, protect_det_preds, protect_track_preds, preprocess_for_masks
 from cmot.losses.supervision import ClassificationSupervision, LossAccumulator, focal_binary_loss
+from cmot.models.motion_prior import (
+    CategoryConditionedMotionPrior,
+    boxes_to_state,
+    normalized_class_evidence,
+)
 from util.list_LVIS import Frequency_list_total_1, Frequency_list_70, novel_class
+
+
+LEGACY_MOTION_MODES = {"one_step_agnostic_v2", "one_step_conditioned_v2"}
+HISTORY_MOTION_MODES = {"history_agnostic_v1", "history_conditioned_v1"}
 
 class TrackerPostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
@@ -297,6 +306,9 @@ class OVFrameMatcher(SetCriterion):
         self._normalizers = {}
         self._loss_layer_tag = 0
         self.last_supervision_diagnostics = {}
+        self.motion_pairs_by_class = {}
+        self.motion_abs_state_error_sum = 0.0
+        self.motion_forecast_iou_sum = 0.0
 
     def set_training_step(self, step: int) -> None:
         self.training_step = int(step)
@@ -318,6 +330,9 @@ class OVFrameMatcher(SetCriterion):
         self._normalizers = {}
         self._loss_layer_tag = 0
         self.last_supervision_diagnostics = {}
+        self.motion_pairs_by_class = {}
+        self.motion_abs_state_error_sum = 0.0
+        self.motion_forecast_iou_sum = 0.0
 
     def _step(self):
         self._current_frame_idx += 1
@@ -464,6 +479,8 @@ class OVFrameMatcher(SetCriterion):
 
     def loss_motion(self, outputs, targets, indices, num_boxes):
         """Supervise causal inverse-sigmoid deltas using the next GT frame."""
+        if self.motion_mode in HISTORY_MOTION_MODES:
+            return self._loss_history_motion(outputs, targets, indices, num_boxes)
         motion = outputs.get('motion_velocity')
         if motion is None:
             return {'loss_motion': outputs['pred_boxes'].sum() * 0}
@@ -507,6 +524,49 @@ class OVFrameMatcher(SetCriterion):
             return {'loss_motion': motion.sum() * 0}
         self.motion_pairs += len(predicted)
         return {'loss_motion': F.smooth_l1_loss(torch.stack(predicted), torch.stack(expected), reduction='sum')}
+
+    def _loss_history_motion(self, outputs, targets, indices, num_boxes):
+        """Regress the current matched legal GT from the causal forecast."""
+        forecast_boxes = outputs.get("motion_forecast_boxes")
+        forecast_valid = outputs.get("motion_forecast_valid")
+        reference = outputs["pred_boxes"].sum() * 0.0
+        if forecast_boxes is None or forecast_valid is None:
+            return {"loss_motion": reference}
+        if forecast_boxes.dim() != 3 or forecast_valid.dim() != 2:
+            raise ValueError("history motion outputs must be [B,Q,4] and [B,Q]")
+        total = None
+        for batch_index, (src_idx, tgt_idx) in enumerate(indices):
+            instance = targets[batch_index]
+            for source_index, target_index in zip(src_idx.tolist(), tgt_idx.tolist()):
+                source_index, target_index = int(source_index), int(target_index)
+                if source_index < 0 or source_index >= forecast_boxes.shape[1]:
+                    continue
+                if not bool(forecast_valid[batch_index, source_index].detach().item()):
+                    continue
+                if target_index < 0 or target_index >= len(instance):
+                    continue
+                source = int(instance.label_sources[target_index].item()) if instance.has("label_sources") else 0
+                if source not in (0, 1):
+                    continue
+                if instance.has("obj_ids") and int(instance.obj_ids[target_index].item()) < 0:
+                    continue
+                predicted_state = boxes_to_state(forecast_boxes[batch_index, source_index])
+                target_state = boxes_to_state(instance.boxes[target_index].to(predicted_state))
+                value = F.smooth_l1_loss(predicted_state, target_state, reduction="sum")
+                total = value if total is None else total + value
+                self.motion_pairs += 1
+                global_id = int(instance.labels[target_index].item())
+                self.motion_pairs_by_class[global_id] = self.motion_pairs_by_class.get(global_id, 0) + 1
+                self.motion_abs_state_error_sum += float(
+                    (predicted_state.detach() - target_state.detach()).abs().sum().item()
+                )
+                self.motion_forecast_iou_sum += float(
+                    self._pair_iou(
+                        forecast_boxes[batch_index, source_index].detach(),
+                        instance.boxes[target_index].to(forecast_boxes),
+                    ).item()
+                )
+        return {"loss_motion": reference if total is None else total}
 
     def loss_align(self, outputs, targets, indices, num_boxes, l1_distillation=False):
         """Alignment mechanism guides generalization capabilities and aligned queries.
@@ -611,6 +671,8 @@ class OVFrameMatcher(SetCriterion):
             'select_id':outputs_without_aux['select_id'],
             'image_feat':outputs_without_aux['image_feat'],
             'motion_velocity': outputs_without_aux.get('motion_velocity', None)[0, keep_indices].unsqueeze(0) if outputs_without_aux.get('motion_velocity', None) is not None else None,
+            'motion_forecast_boxes': outputs_without_aux.get('motion_forecast_boxes', None)[0, keep_indices].unsqueeze(0) if outputs_without_aux.get('motion_forecast_boxes', None) is not None else None,
+            'motion_forecast_valid': outputs_without_aux.get('motion_forecast_valid', None)[0, keep_indices].unsqueeze(0) if outputs_without_aux.get('motion_forecast_valid', None) is not None else None,
         }
 
         obj_idxes = gt_instances_i.obj_ids
@@ -1103,11 +1165,20 @@ class OVTR(nn.Module):
         self.semantic_bank = semantic_bank
         self.continual_cfg = continual_cfg or {}
         self.motion_mode = self.continual_cfg.get("motion_mode", "none")
+        if self.motion_mode not in ("none",) and self.motion_mode not in LEGACY_MOTION_MODES | HISTORY_MOTION_MODES:
+            raise ValueError("unknown C-MOT motion mode: %s" % self.motion_mode)
         self.motion_velocity_limit = float(motion_velocity_limit)
         self.motion_warmup_steps = int(motion_warmup_steps)
         self.motion_detach_features = bool(motion_detach_features)
+        self.motion_detach_history = bool(self.continual_cfg.get("detach_history", True))
         self.motion_detach_reference = bool(motion_detach_reference)
         self.motion_max_dt = float(motion_max_dt)
+        self.motion_history_length = int(self.continual_cfg.get("history_length", 4))
+        self.motion_history_hidden_dim = int(self.continual_cfg.get("history_hidden_dim", 128))
+        self.motion_num_modes = int(self.continual_cfg.get("num_modes", 1))
+        self.motion_semantic_dim = int(self.continual_cfg.get("semantic_dim", self.text_embeddings.shape[0]))
+        self.motion_min_history_points = int(self.continual_cfg.get("min_history_points", 2))
+        self.motion_reference_enabled = bool(self.continual_cfg.get("motion_reference_enabled", True))
         self.motion_training_step = 0
         self.inference_dedup_enabled = bool(inference_dedup_enabled)
         self.duplicate_iou = float(duplicate_iou)
@@ -1124,6 +1195,13 @@ class OVTR(nn.Module):
             "track_capacity_hits": 0,
             "invalid_dt_count": 0,
             "motion_advance_count": 0,
+            "history_observation_count": 0,
+            "history_forecast_valid_count": 0,
+            "history_forecast_invalid_count": 0,
+            "history_reference_apply_count": 0,
+            "history_reference_warmup_skip_count": 0,
+            "history_reference_disabled_count": 0,
+            "history_observation_fallback_count": 0,
             "birth_count": 0,
             "keep_count": 0,
             "export_count": 0,
@@ -1153,11 +1231,26 @@ class OVTR(nn.Module):
         else:
             self.feature_align = nn.ModuleList([self.feature_align for _ in range(num_pred)])
 
-        if self.motion_mode != "none":
+        if self.motion_mode in LEGACY_MOTION_MODES:
             self.motion_head = CausalMotionHead(
                 hidden_dim, self.text_embeddings.shape[0], mode=self.motion_mode,
                 velocity_limit=self.motion_velocity_limit,
                 detach_features=self.motion_detach_features,
+            )
+        elif self.motion_mode in HISTORY_MOTION_MODES:
+            prior_mode = (
+                "class_agnostic"
+                if self.motion_mode == "history_agnostic_v1"
+                else "class_conditioned"
+            )
+            self.motion_head = CategoryConditionedMotionPrior(
+                history_length=self.motion_history_length,
+                hidden_dim=self.motion_history_hidden_dim,
+                num_modes=self.motion_num_modes,
+                semantic_dim=self.motion_semantic_dim,
+                mode=prior_mode,
+                velocity_limit=self.motion_velocity_limit,
+                min_history_points=self.motion_min_history_points,
             )
 
         # bbox
@@ -1261,8 +1354,28 @@ class OVTR(nn.Module):
         track_instances.export_scores = torch.zeros((num_queries,), dtype=torch.float, device=device)
         track_instances.last_timestamp_s = torch.full((num_queries,), float("nan"), dtype=torch.float32, device=device)
         track_instances.motion_valid = torch.zeros((num_queries,), dtype=torch.bool, device=device)
-        if self.motion_mode != "none":
+        if self.motion_mode in LEGACY_MOTION_MODES:
             track_instances.motion_velocity = torch.zeros((num_queries, 4), device=device)
+        elif self.motion_mode in HISTORY_MOTION_MODES:
+            history_length = self.motion_history_length
+            track_instances.history_boxes = torch.zeros(
+                (num_queries, history_length, 4), dtype=torch.float32, device=device
+            )
+            track_instances.history_times = torch.full(
+                (num_queries, history_length), float("nan"), dtype=torch.float32, device=device
+            )
+            track_instances.history_valid = torch.zeros(
+                (num_queries, history_length), dtype=torch.bool, device=device
+            )
+            track_instances.history_quality = torch.zeros(
+                (num_queries, history_length), dtype=torch.float32, device=device
+            )
+            track_instances.motion_forecast_boxes = torch.zeros(
+                (num_queries, 4), dtype=torch.float32, device=device
+            )
+            track_instances.motion_forecast_valid = torch.zeros(
+                (num_queries,), dtype=torch.bool, device=device
+            )
 
         if not self.training:
             track_instances.cls_idxes = torch.full((num_queries,), -1, dtype=torch.long, device=device)
@@ -1274,9 +1387,75 @@ class OVTR(nn.Module):
         if hasattr(self.criterion, "set_training_step"):
             self.criterion.set_training_step(int(step))
 
-    def _advance_motion_references(self, track_instances, current_timestamp_s):
-        """Apply a detached velocity once before the current transformer call."""
-        if self.motion_mode == "none" or not track_instances.has("motion_velocity"):
+    def _motion_semantic_context(self, track_instances, select_id):
+        """Build query-aligned semantic context from the previous frame only."""
+        if torch.is_tensor(select_id):
+            select_id = select_id.to(device=track_instances.pred_logits.device, dtype=torch.long)
+        else:
+            select_id = torch.as_tensor(select_id, device=track_instances.pred_logits.device, dtype=torch.long)
+        logits = track_instances.pred_logits
+        if logits.shape[-1] != len(select_id):
+            raise ValueError(
+                "motion semantic logits/select_id mismatch: %d != %d"
+                % (int(logits.shape[-1]), len(select_id))
+            )
+        evidence = normalized_class_evidence(logits)
+        active_text = self.text_embeddings[:, select_id].transpose(0, 1).to(
+            track_instances.pred_boxes.device, track_instances.pred_boxes.dtype
+        )
+        return evidence.to(active_text) @ active_text
+
+    def _append_motion_history(self, track_instances, frame_context):
+        """Append current predicted boxes to the per-query causal ring buffer."""
+        if self.motion_mode not in HISTORY_MOTION_MODES or not track_instances.has("history_boxes"):
+            return track_instances
+        frame_context = frame_context or {}
+        timestamp = frame_context.get("timestamp_s")
+        try:
+            timestamp = float(timestamp) if timestamp is not None else None
+        except (TypeError, ValueError):
+            timestamp = None
+        if timestamp is None or not math.isfinite(timestamp):
+            return track_instances
+
+        active = track_instances.obj_idxes >= 0
+        if self.training:
+            update_mask = active & (track_instances.matched_gt_idxes >= 0) & (track_instances.iou >= 0.5)
+        elif track_instances.has("observed_this_frame") and track_instances.has("suppressed_this_frame"):
+            update_mask = active & track_instances.observed_this_frame.bool() & (~track_instances.suppressed_this_frame.bool())
+        else:
+            update_mask = active & (track_instances.scores >= self.track_base.keep_threshold)
+            self.runtime_stats["history_observation_fallback_count"] += 1
+
+        candidate_boxes = torch.cat(
+            [track_instances.history_boxes[:, 1:], track_instances.pred_boxes.detach()[:, None, :4]], dim=1
+        )
+        current_time = torch.full(
+            (len(track_instances), 1), timestamp,
+            dtype=track_instances.history_times.dtype,
+            device=track_instances.history_times.device,
+        )
+        candidate_times = torch.cat([track_instances.history_times[:, 1:], current_time], dim=1)
+        candidate_valid = torch.cat(
+            [track_instances.history_valid[:, 1:], torch.ones(
+                (len(track_instances), 1), dtype=torch.bool, device=track_instances.history_valid.device
+            )], dim=1
+        )
+        candidate_quality = torch.cat(
+            [track_instances.history_quality[:, 1:], track_instances.scores.detach().clamp(0.0, 1.0)[:, None]], dim=1
+        )
+        mask_boxes = update_mask[:, None, None]
+        mask_history = update_mask[:, None]
+        track_instances.history_boxes = torch.where(mask_boxes, candidate_boxes, track_instances.history_boxes)
+        track_instances.history_times = torch.where(mask_history, candidate_times, track_instances.history_times)
+        track_instances.history_valid = torch.where(mask_history, candidate_valid, track_instances.history_valid)
+        track_instances.history_quality = torch.where(mask_history, candidate_quality, track_instances.history_quality)
+        self.runtime_stats["history_observation_count"] += int(update_mask.sum().item())
+        return track_instances
+
+    def _advance_one_step_motion_references(self, track_instances, current_timestamp_s):
+        """Apply the legacy detached one-step velocity before the transformer."""
+        if not track_instances.has("motion_velocity"):
             return track_instances
         timestamp = current_timestamp_s
         base = inverse_sigmoid(track_instances.pred_boxes[:, :4].detach().clamp(1e-5, 1.0 - 1e-5))
@@ -1299,6 +1478,85 @@ class OVTR(nn.Module):
         track_instances.ref_pts = ref
         self.runtime_stats["motion_advance_count"] += int(usable.sum().item())
         return track_instances
+
+    def _advance_history_motion_references(self, track_instances, current_timestamp_s):
+        """Forecast the next box from the causal history and update references."""
+        base_boxes = track_instances.pred_boxes[:, :4].detach().clamp(1e-5, 1.0 - 1e-5)
+        base_ref = inverse_sigmoid(base_boxes)
+        active = track_instances.obj_idxes >= 0
+        history_valid = track_instances.history_valid.bool()
+        finite_history = history_valid & torch.isfinite(track_instances.history_times)
+        has_time = finite_history.any(dim=1)
+        safe_times = torch.where(
+            finite_history, track_instances.history_times,
+            torch.full_like(track_instances.history_times, float("-inf")),
+        )
+        last_valid_time = safe_times.max(dim=1).values
+        if current_timestamp_s is None:
+            track_instances.ref_pts = base_ref
+            track_instances.motion_forecast_boxes = torch.zeros_like(track_instances.pred_boxes[:, :4])
+            track_instances.motion_forecast_valid = torch.zeros_like(track_instances.obj_idxes, dtype=torch.bool)
+            self.runtime_stats["invalid_dt_count"] += int((active & has_time).sum().item())
+            self.runtime_stats["history_forecast_invalid_count"] += int(active.sum().item())
+            return track_instances
+        try:
+            current_timestamp = float(current_timestamp_s)
+        except (TypeError, ValueError):
+            current_timestamp = float("nan")
+        current = torch.full_like(last_valid_time, current_timestamp)
+        next_delta_t = current - last_valid_time
+        dt_valid = has_time & torch.isfinite(next_delta_t) & (next_delta_t > 0) & (next_delta_t <= self.motion_max_dt)
+        if not bool(dt_valid.all().item()):
+            self.runtime_stats["invalid_dt_count"] += int((active & (~dt_valid)).sum().item())
+
+        if self.class_registry is not None:
+            select_id = torch.as_tensor(
+                self.class_registry.active_select_ids(),
+                device=track_instances.pred_logits.device,
+                dtype=torch.long,
+            )
+        else:
+            select_id = torch.as_tensor(self.select_id, device=track_instances.pred_logits.device, dtype=torch.long)
+        semantic_context = self._motion_semantic_context(track_instances, select_id)
+        forecast = self.motion_head(
+            track_instances.history_boxes,
+            track_instances.history_times,
+            track_instances.history_valid,
+            track_instances.history_quality,
+            semantic_context,
+            next_delta_t,
+        )
+        forecast_valid = forecast.valid & dt_valid & active
+        track_instances.motion_forecast_boxes = forecast.next_boxes
+        track_instances.motion_forecast_valid = forecast_valid
+        valid_count = int(forecast_valid.sum().item())
+        invalid_count = int((active & (~forecast_valid)).sum().item())
+        self.runtime_stats["history_forecast_valid_count"] += valid_count
+        self.runtime_stats["history_forecast_invalid_count"] += invalid_count
+
+        warmup = self.training and self.motion_training_step <= self.motion_warmup_steps
+        if warmup:
+            track_instances.ref_pts = base_ref
+            self.runtime_stats["history_reference_warmup_skip_count"] += valid_count
+        elif not self.motion_reference_enabled:
+            track_instances.ref_pts = base_ref
+            self.runtime_stats["history_reference_disabled_count"] += valid_count
+        else:
+            predicted = forecast.next_boxes.detach() if self.motion_detach_reference else forecast.next_boxes
+            new_ref = inverse_sigmoid(predicted.clamp(1e-5, 1.0 - 1e-5))
+            track_instances.ref_pts = torch.where(forecast_valid[:, None], new_ref, base_ref)
+            self.runtime_stats["history_reference_apply_count"] += valid_count
+        return track_instances
+
+    def _advance_motion_references(self, track_instances, current_timestamp_s):
+        """Dispatch the configured motion implementation before each frame."""
+        if self.motion_mode == "none":
+            return track_instances
+        if self.motion_mode in LEGACY_MOTION_MODES:
+            return self._advance_one_step_motion_references(track_instances, current_timestamp_s)
+        if self.motion_mode in HISTORY_MOTION_MODES:
+            return self._advance_history_motion_references(track_instances, current_timestamp_s)
+        raise ValueError("unknown C-MOT motion mode: %s" % self.motion_mode)
 
     def consume_runtime_stats(self):
         value = dict(self.runtime_stats)
@@ -1436,7 +1694,7 @@ class OVTR(nn.Module):
         outputs_coord = torch.stack(outputs_coords)
         outputs_embed = torch.stack(outputs_embeds)
         motion_velocity = None
-        if self.motion_mode != "none":
+        if self.motion_mode in LEGACY_MOTION_MODES:
             motion_velocity = self.motion_head(
                 hs_ofa[-1], outputs_coord[-1], outputs_class[-1], select_id, self.text_embeddings)
 
@@ -1452,8 +1710,12 @@ class OVTR(nn.Module):
             "select_id": select_id,
             "image_feat": image_feat_ori,
             "extra_labels": extra_labels,
-            "motion_velocity": motion_velocity,
             }
+        if self.motion_mode in LEGACY_MOTION_MODES:
+            out["motion_velocity"] = motion_velocity
+        elif self.motion_mode in HISTORY_MOTION_MODES:
+            out["motion_forecast_boxes"] = track_instances.motion_forecast_boxes.unsqueeze(0)
+            out["motion_forecast_valid"] = track_instances.motion_forecast_valid.unsqueeze(0)
 
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord, outputs_embed)
@@ -1518,6 +1780,11 @@ class OVTR(nn.Module):
                 self.runtime_stats["export_count"] += int(track_instances.export_valid.sum().item())
             if len(track_instances) >= self.track_base.maximum_quantity:
                 self.runtime_stats["track_capacity_hits"] += 1
+
+        if self.motion_mode in HISTORY_MOTION_MODES:
+            # Matcher/tracker state is now authoritative for this frame.  The
+            # history itself still receives only detached model predictions.
+            self._append_motion_history(track_instances, frame_context)
 
         if frame_context is not None and frame_context.get("timestamp_s") is not None:
             timestamp = float(frame_context["timestamp_s"])
@@ -1663,7 +1930,7 @@ class OVTR(nn.Module):
                 extra_labels = None
             else:
                 extra_labels = frame_res["extra_labels"]
-            if self.use_checkpoint and frame_index < len(frames) - 3:
+            if self.use_checkpoint and self.motion_mode not in HISTORY_MOTION_MODES and frame_index < len(frames) - 3:
                 def fn(frame, *args):
                     frame = nested_tensor_from_tensor_list([frame])
                     tmp = Instances((1, 1), **dict(zip(keys, args)))
@@ -1713,7 +1980,7 @@ class OVTR(nn.Module):
                 frame_context = dict(frame_context)
                 frame_context["max_motion_dt"] = self.motion_max_dt
                 frame_res = self._forward_single_image(frame, track_instances, targets, extra_labels, is_first, cls_num, frame_context=frame_context)
-            if self.use_checkpoint and frame_index < len(frames) - 3:
+            if self.use_checkpoint and self.motion_mode not in HISTORY_MOTION_MODES and frame_index < len(frames) - 3:
                 frame_context = None
             else:
                 frame_context = data.get("frame_metadata", [{}] * len(frames))[frame_index]

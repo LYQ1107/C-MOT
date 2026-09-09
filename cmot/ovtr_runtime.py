@@ -88,8 +88,15 @@ def make_model(
     cfg.cmot_motion_velocity_limit = float(motion_cfg.get("velocity_limit", 1.25))
     cfg.cmot_motion_warmup_steps = int(motion_cfg.get("warmup_steps", 20))
     cfg.cmot_motion_detach_features = bool(motion_cfg.get("detach_features", True))
+    cfg.cmot_motion_detach_history = bool(motion_cfg.get("detach_history", True))
     cfg.cmot_motion_detach_reference = bool(motion_cfg.get("detach_reference", True))
+    cfg.cmot_motion_reference_enabled = bool(motion_cfg.get("reference_enabled", True))
     cfg.cmot_motion_max_dt = float(motion_cfg.get("max_dt", 2.0))
+    cfg.cmot_motion_history_length = int(motion_cfg.get("history_length", 4))
+    cfg.cmot_motion_history_hidden_dim = int(motion_cfg.get("history_hidden_dim", motion_cfg.get("hidden_dim", 128)))
+    cfg.cmot_motion_num_modes = int(motion_cfg.get("num_modes", 1))
+    cfg.cmot_motion_semantic_dim = int(motion_cfg.get("semantic_dim", 512))
+    cfg.cmot_motion_min_history_points = int(motion_cfg.get("min_history_points", 2))
     cfg.cmot_inference_dedup_enabled = bool(inference_cfg.get("inference_dedup_enabled", True))
     cfg.cmot_birth_threshold = float(inference_cfg.get("birth_threshold", score_threshold))
     cfg.cmot_keep_threshold = float(inference_cfg.get("keep_threshold", filter_threshold))
@@ -110,8 +117,15 @@ def make_model(
         "velocity_limit": cfg.cmot_motion_velocity_limit,
         "warmup_steps": cfg.cmot_motion_warmup_steps,
         "detach_features": cfg.cmot_motion_detach_features,
+        "detach_history": cfg.cmot_motion_detach_history,
         "detach_reference": cfg.cmot_motion_detach_reference,
+        "motion_reference_enabled": cfg.cmot_motion_reference_enabled,
         "max_dt": cfg.cmot_motion_max_dt,
+        "history_length": cfg.cmot_motion_history_length,
+        "history_hidden_dim": cfg.cmot_motion_history_hidden_dim,
+        "num_modes": cfg.cmot_motion_num_modes,
+        "semantic_dim": cfg.cmot_motion_semantic_dim,
+        "min_history_points": cfg.cmot_motion_min_history_points,
         "duplicate_iou": cfg.cmot_duplicate_iou,
         "duplicate_feature_cos": cfg.cmot_duplicate_feature_cos,
         "dedup_new_new": cfg.cmot_dedup_new_new,
@@ -121,6 +135,26 @@ def make_model(
     cfg.cmot_runtime_config = resolved
     model, criterion = build_model(args, cfg)
     model.to(torch.device(device))
+    history_modes = {"history_agnostic_v1", "history_conditioned_v1"}
+    if motion_mode in history_modes:
+        motion_head = getattr(model, "motion_head", None)
+        if motion_head is None or motion_head.__class__.__name__ != "CategoryConditionedMotionPrior":
+            raise AssertionError("history motion mode did not build CategoryConditionedMotionPrior")
+        expected_mode = "class_agnostic" if motion_mode == "history_agnostic_v1" else "class_conditioned"
+        actual = {
+            "history_length": int(getattr(motion_head, "history_length", -1)),
+            "hidden_dim": int(getattr(motion_head, "hidden_dim", -1)),
+            "num_modes": int(getattr(motion_head, "num_modes", -1)),
+            "mode": str(getattr(motion_head, "mode", "")),
+        }
+        expected = {
+            "history_length": cfg.cmot_motion_history_length,
+            "hidden_dim": cfg.cmot_motion_history_hidden_dim,
+            "num_modes": cfg.cmot_motion_num_modes,
+            "mode": expected_mode,
+        }
+        if actual != expected:
+            raise AssertionError("history motion mapping failed: %s != %s" % (actual, expected))
     if getattr(model, "track_base", None) is not None:
         actual = {
             "birth_threshold": float(model.track_base.birth_threshold),

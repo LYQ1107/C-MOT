@@ -159,12 +159,22 @@ class BalancedClipSampler(torch.utils.data.Sampler):
             if self.stream_schedule[index % len(self.stream_schedule)] == "current"
         )
 
+    def _is_negative_step(self, absolute_step: int) -> bool:
+        fraction = float(self.negative_fraction)
+        if fraction <= 0.0:
+            return False
+        if fraction >= 1.0:
+            return True
+        before = int(float(absolute_step) * fraction)
+        after = int(float(absolute_step + 1) * fraction)
+        return after > before
+
     def __iter__(self):
         for absolute_step in range(self.start_step, self.total_steps):
             stream = self.stream_schedule[absolute_step % len(self.stream_schedule)]
             if stream == "replay" and not self._orders.get(("replay", True)) and not self._orders.get(("replay", False)):
                 stream = "current"
-            positive = (absolute_step % 5) != 4
+            positive = not self._is_negative_step(absolute_step)
             value = None
             if (
                 stream == "current"

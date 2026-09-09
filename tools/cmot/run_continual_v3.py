@@ -9,6 +9,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import shutil
 import sys
@@ -38,6 +39,7 @@ from cmot.class_registry import tao_bdd_registry
 CLASS_IDS = {"car": 206, "pedestrian": 792, "truck": 1122}
 CLASS_NAMES = {value: key for key, value in CLASS_IDS.items()}
 ALL_IDS = [206, 792, 1122]
+HISTORY_MOTION_MODES = {"history_agnostic_v1", "history_conditioned_v1"}
 _RUNTIME_CONTRACT_CACHE = {}
 
 
@@ -544,14 +546,14 @@ class V3Runner:
         self.config_path = str(config_path)
         self.runtime_path = str(runtime_path)
         self.config = load_config(config_path)
-        if self.config.get("schema_version") != "cmot.continual_v3":
-            raise ValueError("run_continual_v3 requires cmot.continual_v3")
+        if self.config.get("schema_version") not in ("cmot.continual_v3", "cmot.continual_v4"):
+            raise ValueError("run_continual_v3 requires cmot.continual_v3 or cmot.continual_v4")
         self.runtime = _read_json(runtime_path)
         if self.runtime.get("schema_version") not in ("cmot.continual_v3.runtime.v1", "cmot.runtime-local.v1"):
             raise ValueError("unsupported V3 runtime schema")
         self.paths = dict(self.runtime.get("paths", {}))
         self.targets = tuple(value for value in targets if value)
-        allowed = {"diagnose", "s0", "joint", "s1", "s2", "p3", "motion", "controls"}
+        allowed = {"diagnose", "s0", "joint", "s1", "s2", "p3", "motion", "controls", "v4_motion"}
         if not set(self.targets) <= allowed:
             raise ValueError("unknown V3 target: %s" % sorted(set(self.targets) - allowed))
         self.resume = bool(resume)
@@ -567,7 +569,7 @@ class V3Runner:
             directory.mkdir(parents=True, exist_ok=True)
         self.state_path = self.root / "execution_state.json"
         self.state = _read_json(str(self.state_path)) if self.resume and self.state_path.is_file() else {
-            "schema_version": "cmot.continual_v3.execution.v1",
+            "schema_version": "cmot.continual_v4.execution.v1" if self.config.get("schema_version") == "cmot.continual_v4" else "cmot.continual_v3.execution.v1",
             "config_sha256": sha256_file(config_path),
             "runtime_basename": Path(runtime_path).name,
             "canonical_manifest_sha256": None,
@@ -2034,10 +2036,16 @@ class V3Runner:
         pseudo = dict(self.config.get("pseudo", {}))
         supervision = dict(self.config.get("supervision", {}))
         calibration = dict(self.config.get("calibration", {}))
+        policy_version = str(pseudo.get("policy_version", "qpl_segment_v2"))
+        selector = (
+            "qpl_segment_v3_highscore_center"
+            if policy_version == "qpl_segment_v3"
+            else "qpl_segment_v2_cap_fix_1"
+        )
         return canonical_json_hash({
             "stage": str(stage),
             "old_global_ids": [int(value) for value in old_ids],
-            "selector_implementation": "qpl_segment_v2_cap_fix_1",
+            "selector_implementation": selector,
             "calibration": calibration,
             "pseudo": pseudo,
             "conflict_iou": float(supervision.get("conflict_iou", 0.7)),
@@ -2099,8 +2107,8 @@ class V3Runner:
     ) -> Tuple[Optional[str], dict]:
         pseudo = dict(self.config.get("pseudo", {}))
         policy_version = str(pseudo.get("policy_version", "qpl_segment_v2"))
-        if policy_version != "qpl_segment_v2":
-            raise ValueError("V3.1 QPLSEG requires pseudo.policy_version=qpl_segment_v2")
+        if policy_version not in ("qpl_segment_v2", "qpl_segment_v3"):
+            raise ValueError("QPLSEG requires a connected qpl_segment_v2 or qpl_segment_v3 policy")
         teacher_hash = sha256_file(teacher_checkpoint)
         raw_path, _ = self._teacher_prediction_source(
             stage, "teacher_raw", teacher_checkpoint, teacher_source_view, old_ids, "train", teacher_resolved
@@ -2179,7 +2187,7 @@ class V3Runner:
                 "teacher_checkpoint_sha256": teacher_hash,
             })
         policy_hash = self._pseudo_policy_hash(stage, old_ids)
-        pl_path = self.teacher_root / ("%s_qpl_segment_v2.jsonl" % stage)
+        pl_path = self.teacher_root / ("%s_qpl_segment_%s.jsonl" % (stage, policy_version.rsplit("_", 1)[-1]))
         pl_metadata = {
             "schema_version": "cmot.continual_v3.pl",
             "pseudo_policy_version": policy_version,
@@ -2593,6 +2601,607 @@ class V3Runner:
             output[method] = self._record_result("S1", method, resolved, train_summary, eval_summary, metrics, baseline_checkpoint, None, None, None, _read_json(replay).get("memory_version"))
         return output
 
+    def _run_v4_motion(self) -> dict:
+        """Run only the controlled V4 S2 history-dynamics matrix."""
+        report_root = REPO_ROOT / "reports" / "v4_motion"
+        report_root.mkdir(parents=True, exist_ok=True)
+        expected_parent_sha = "e5157b270878bab010954c7642f8eb3cb5562e80b3a3e9073748e52237a216e1"
+        method_names = ("V4-B0-S2", "V4-HIST-AGN-S2", "V4-HIST-COND-S2")
+        base_methods = {
+            "V4-B0-S2": "V4-B0",
+            "V4-HIST-AGN-S2": "V4-HIST-AGN",
+            "V4-HIST-COND-S2": "V4-HIST-COND",
+            "V4-HIST-COND-AUX-S2": "V4-HIST-COND-AUX",
+        }
+        output = {}
+
+        def _number(value):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) else None
+
+        def _metric(record, section, key):
+            metrics = record.get("metrics", {}) if isinstance(record, Mapping) else {}
+            section_value = metrics.get(section, {}) if isinstance(metrics, Mapping) else {}
+            return _number(section_value.get(key)) if isinstance(section_value, Mapping) else None
+
+        def _motion_gradient_audit(run_name, train_summary):
+            expected = (
+                "history_input", "history_gru", "semantic_projection", "velocity_head"
+            )
+            if str(train_summary.get("motion_mode", "none")) not in HISTORY_MOTION_MODES:
+                return {name: "NOT_RUN" for name in expected}
+            step_log = self.run_root / run_name / str(train_summary.get("step_log", "train_steps.jsonl"))
+            observations = {name: [] for name in expected}
+            if step_log.is_file():
+                with step_log.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        parameters = record.get("parameter_audit", {})
+                        for short_name in expected:
+                            full_name = "motion_head." + short_name
+                            if short_name == "history_gru":
+                                full_name = "motion_head.history_gru.weight_ih"
+                            elif short_name == "history_input":
+                                full_name = "motion_head.history_input.weight"
+                            elif short_name == "semantic_projection":
+                                full_name = "motion_head.semantic_projection.0.weight"
+                            elif short_name == "velocity_head":
+                                full_name = "motion_head.velocity_head.weight"
+                            value = parameters.get(full_name)
+                            if value is not None:
+                                observations[short_name].append(value)
+            result = {}
+            for name, values in observations.items():
+                if not values:
+                    result[name] = {"status": "NOT_RUN", "audit_count": 0}
+                    continue
+                last = values[-1]
+                result[name] = {
+                    "status": "OK",
+                    "audit_count": len(values),
+                    "grad_present_all": all(bool(v.get("grad_present")) for v in values),
+                    "grad_finite_all": all(bool(v.get("grad_finite")) for v in values),
+                    "effective_gradient_observed": any(float(v.get("grad_norm") or 0.0) > 0.0 for v in values),
+                    "last_grad_norm": last.get("grad_norm"),
+                    "last_update_norm": last.get("update_norm"),
+                }
+            return result
+
+        def _segment_rows(admission):
+            if not isinstance(admission, Mapping):
+                return []
+            value = admission.get("filter", admission)
+            if not isinstance(value, Mapping):
+                return []
+            rows = value.get("selected_segment_audit", [])
+            return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+        def _qpl_audit(old_admission_path, new_admission):
+            old_admission = _read_json(str(old_admission_path)) if old_admission_path.is_file() else None
+            old_rows = _segment_rows(old_admission)
+            new_rows = _segment_rows(new_admission)
+            old_ids = {str(row.get("segment_id")) for row in old_rows if row.get("segment_id")}
+            new_ids = {str(row.get("segment_id")) for row in new_rows if row.get("segment_id")}
+            old_frames = {
+                str(frame)
+                for row in old_rows
+                for frame in row.get("frame_keys", [])
+            }
+            new_frames = {
+                str(frame)
+                for row in new_rows
+                for frame in row.get("frame_keys", [])
+            }
+            old_videos = {str(row.get("video_uid")) for row in old_rows if row.get("video_uid")}
+            new_videos = {str(row.get("video_uid")) for row in new_rows if row.get("video_uid")}
+
+            def _mean(rows, key):
+                values = [_number(row.get(key)) for row in rows]
+                values = [value for value in values if value is not None]
+                return None if not values else sum(values) / float(len(values))
+
+            def _overlap(left, right):
+                union = left | right
+                return {
+                    "count": len(left & right),
+                    "jaccard": None if not union else len(left & right) / float(len(union)),
+                }
+
+            return {
+                "old_policy": "qpl_segment_v2",
+                "new_policy": "qpl_segment_v3",
+                "old_manifest": None if not old_admission_path.is_file() else _safe_basename_ref(str(old_admission_path)),
+                "old_selected_segments": len(old_rows),
+                "new_selected_segments": len(new_rows),
+                "segment_id_overlap": _overlap(old_ids, new_ids),
+                "frame_overlap": _overlap(old_frames, new_frames),
+                "source_video_overlap": _overlap(old_videos, new_videos),
+                "old_mean_reliability": _mean(old_rows, "reliability"),
+                "new_mean_reliability": _mean(new_rows, "reliability"),
+                "old_mean_score": _mean(old_rows, "mean_score"),
+                "new_mean_score": _mean(new_rows, "mean_score"),
+                "old_filter_status": None if not isinstance(old_admission, Mapping) else old_admission.get("status"),
+                "new_filter_status": None if not isinstance(new_admission, Mapping) else new_admission.get("status"),
+            }
+
+        def _public_record(record):
+            """Keep public reports aggregate-only and free of sample identifiers."""
+            value = deepcopy(dict(record))
+            value.pop("pl_path", None)
+            admission = value.get("teacher_admission")
+            if isinstance(admission, Mapping):
+                compact = {}
+                scalar_keys = (
+                    "status", "pseudo_policy_version", "pseudo_policy_hash",
+                    "teacher_checkpoint_sha256", "candidate_segments",
+                    "selected_segments", "selected_frame_predictions",
+                    "selected_segments_by_class", "selected_frames_by_class",
+                    "per_class_segment_cap", "disabled_global_ids",
+                    "rejected_duplicate_segments", "rejected_frame_budget",
+                    "rejected_gt_conflict_segments", "rejected_segment_budget",
+                    "rejected_short_segments", "thresholds",
+                    "calibration_prediction", "calibration_view_sha256",
+                    "raw_prediction",
+                )
+                for key in scalar_keys:
+                    if key in admission:
+                        compact[key] = deepcopy(admission[key])
+                calibration = admission.get("calibration")
+                if isinstance(calibration, Mapping):
+                    compact_calibration = {}
+                    selected_keys = (
+                        "correct", "eligible", "precision", "predictions",
+                        "threshold", "videos", "wilson_lower",
+                    )
+                    for class_id, class_value in calibration.items():
+                        if not isinstance(class_value, Mapping):
+                            continue
+                        item = {"status": class_value.get("status")}
+                        selected = class_value.get("selected")
+                        if isinstance(selected, Mapping):
+                            item["selected"] = {
+                                key: deepcopy(selected[key])
+                                for key in selected_keys if key in selected
+                            }
+                        if class_value.get("reason"):
+                            item["reason"] = class_value["reason"]
+                        compact_calibration[str(class_id)] = item
+                    compact["calibration"] = compact_calibration
+                filter_value = admission.get("filter")
+                if isinstance(filter_value, Mapping):
+                    filter_keys = (
+                        "status", "accepted", "accepted_by_class",
+                        "candidate_segments", "selected_segments",
+                        "selected_segments_by_class", "selected_frame_predictions",
+                        "selected_frames_by_class", "selected_source_video_counts_by_class",
+                        "rejected_duplicate_segments", "rejected_frame_budget",
+                        "rejected_gt_conflict_segments", "rejected_segment_budget",
+                        "rejected_short_segments", "teacher_checkpoint_sha256",
+                    )
+                    compact["filter"] = {
+                        key: deepcopy(filter_value[key])
+                        for key in filter_keys if key in filter_value
+                    }
+                value["teacher_admission"] = compact
+            return value
+
+        try:
+            references = self._control_reference_results()
+            parent_reference = references.get("R-QPLSEG-S1")
+            if not parent_reference or parent_reference.get("execution_status") != "COMPLETE":
+                raise RuntimeError("NOT_RUN_PARENT_QPLSEG_INVALID")
+            parent_checkpoint = self._checkpoint_for_result(parent_reference)
+            parent_sha = sha256_file(parent_checkpoint)
+            if parent_sha != expected_parent_sha:
+                raise RuntimeError("BLOCKED_ARTIFACT_HASH_MISMATCH V4 parent checkpoint")
+
+            split = self._partition("S2")
+            base_view, _ = self._make_view(
+                "S2_current_train.json", "S2", "train", "cil", split["train_video_ids"],
+                ALL_IDS, [1122], [206, 792], "train", "train",
+            )
+            calibration_view, _ = self._make_view(
+                "S2_calibration.json", "S2", "eval", "cil", split["calibration_video_ids"],
+                [206, 792], [206, 792], [], "train", "calibration",
+            )
+            teacher_source_view, _ = self._make_view(
+                "S2_teacher_source.json", "S2", "eval", "cil", split["train_video_ids"],
+                [206, 792], [206, 792], [], "train", "train",
+            )
+            teacher_resolved = self._resolved("R-QPLSEG", "S1")
+            pl_path, pl_audit = self._prepare_teacher_pl(
+                "S2", parent_checkpoint, teacher_resolved, teacher_source_view,
+                calibration_view, base_view, [206, 792], [1122],
+            )
+            if not pl_path:
+                raise RuntimeError("NOT_RUN_PL_EMPTY")
+            qpl_view, _ = self._make_view(
+                "S2_qpl_segment_v3_current_train.json", "S2", "train", "cil",
+                split["train_video_ids"], ALL_IDS, [1122], [206, 792], "train", "train",
+                pl_path, True,
+            )
+            _, memory_payload, replay_view = self._build_memory(
+                "S1", base_view, [206, 792], "S1_memory_common.json", "S2_replay.json"
+            )
+            memory_version = memory_payload.get("memory_version")
+            qpl_manifest_sha = sha256_file(pl_path)
+            replay_sha = sha256_file(replay_view)
+            current_sha = sha256_file(qpl_view)
+            eval_view, _ = self._make_view(
+                "S2_eval.json", "S2", "eval", "cil", self.eval_ids,
+                ALL_IDS, [1122], [206, 792], "val", "val",
+            )
+            eval_sha = sha256_file(eval_view)
+            protocol_hash = canonical_json_hash({
+                "schema": "cmot.continual_v4",
+                "canonical": sha256_file(self.canonical),
+                "eval": sha256_file(self.eval_slice),
+                "seed": int(self.config["seed"]),
+                "stage": "S2",
+                "parent_checkpoint_sha256": parent_sha,
+                "current_view_sha256": current_sha,
+                "replay_view_sha256": replay_sha,
+                "qpl_manifest_sha256": qpl_manifest_sha,
+            })
+
+            train_summaries = {}
+            gradient_audits = {}
+            for run_name in method_names:
+                base_method = base_methods[run_name]
+                resolved = self._resolved(base_method, "S2")
+                resolved["protocol_hash"] = protocol_hash
+                resolved["replay_memory_version"] = memory_version
+                existing = self._result(run_name)
+                if self.resume and existing and existing.get("execution_status") == "COMPLETE":
+                    output[run_name] = existing
+                    summary_path = self.run_root / run_name / "train_summary.json"
+                    if summary_path.is_file():
+                        train_summaries[run_name] = _read_json(str(summary_path))
+                        gradient_audits[run_name] = _motion_gradient_audit(run_name, train_summaries[run_name])
+                    continue
+                self._event("v4_train_start", run=run_name, steps=600)
+                try:
+                    train_summary = self._train_stage(
+                        resolved, qpl_view, run_name, parent_checkpoint, replay_view
+                    )
+                    train_summaries[run_name] = train_summary
+                    gradient_audits[run_name] = _motion_gradient_audit(run_name, train_summary)
+                    motion_summary = dict(train_summary.get("motion_diagnostics", {}))
+                    if base_method != "V4-B0" and int(motion_summary.get("motion_pairs", 0)) <= 0:
+                        raise RuntimeError("INVALID_MOTION_COVERAGE motion_pairs=0")
+                    eval_summary, metrics = self._evaluate(resolved, train_summary, eval_view, run_name)
+                    record = _result_record(
+                        "S2", run_name, resolved, train_summary, eval_summary, metrics,
+                        parent_checkpoint, None, pl_path, pl_audit, memory_version,
+                        evaluation_scope="pilot",
+                    )
+                    record.update({
+                        "v4_motion_label": "none" if base_method == "V4-B0" else "history GRU",
+                        "v4_semantic_condition": (
+                            "not_applicable" if base_method == "V4-B0"
+                            else "conditioned" if base_method in {"V4-HIST-COND", "V4-HIST-COND-AUX"}
+                            else "agnostic"
+                        ),
+                        "v4_reference_update": False if base_method == "V4-B0" else bool(resolved.get("motion", {}).get("reference_enabled", True)),
+                        "motion_diagnostics": train_summary.get("motion_diagnostics", {}),
+                        "motion_runtime_stats": train_summary.get("runtime_stats", {}),
+                        "motion_gradient_update_audit": gradient_audits[run_name],
+                    })
+                    output[run_name] = self._record_result(run_name, record)
+                except Exception as exc:
+                    self._event("v4_run_failure", run=run_name, type=type(exc).__name__, message=str(exc))
+                    failed = _not_run_record("S2", run_name, resolved, str(exc), "FAILED")
+                    failed.update({
+                        "parent_checkpoint_sha256": parent_sha,
+                        "current_view_sha256": _view_hash(qpl_view),
+                        "replay_view_sha256": _view_hash(replay_view),
+                        "pl_manifest_sha256": qpl_manifest_sha,
+                        "resolved_config_sha256": canonical_json_hash(resolved),
+                        "motion_gradient_update_audit": gradient_audits.get(run_name, "NOT_RUN"),
+                    })
+                    output[run_name] = self._record_result(run_name, failed)
+
+            b0 = output.get("V4-B0-S2", {})
+            cond = output.get("V4-HIST-COND-S2", {})
+            b0_hota = _metric(b0, "all_seen_macro", "HOTA_mean")
+            cond_hota = _metric(cond, "all_seen_macro", "HOTA_mean")
+            b0_assa = _metric(b0, "all_seen_macro", "AssA_mean")
+            cond_assa = _metric(cond, "all_seen_macro", "AssA_mean")
+            gate = {
+                "all_hota_threshold": 0.01,
+                "all_assa_threshold": 0.02,
+                "b0_all_HOTA_mean": b0_hota,
+                "cond_all_HOTA_mean": cond_hota,
+                "b0_all_AssA_mean": b0_assa,
+                "cond_all_AssA_mean": cond_assa,
+                "hota_pass": bool(b0_hota is not None and cond_hota is not None and cond_hota >= b0_hota + 0.01),
+                "assa_pass": bool(b0_assa is not None and cond_assa is not None and cond_assa >= b0_assa + 0.02),
+            }
+            gate["authorized"] = bool(gate["hota_pass"] or gate["assa_pass"])
+            aux_name = "V4-HIST-COND-AUX-S2"
+            aux_resolved = self._resolved("V4-HIST-COND-AUX", "S2")
+            aux_resolved["protocol_hash"] = protocol_hash
+            aux_resolved["replay_memory_version"] = memory_version
+            if gate["authorized"]:
+                existing_aux = self._result(aux_name)
+                if self.resume and existing_aux and existing_aux.get("execution_status") == "COMPLETE":
+                    output[aux_name] = existing_aux
+                    aux_summary_path = self.run_root / aux_name / "train_summary.json"
+                    if aux_summary_path.is_file():
+                        train_summaries[aux_name] = _read_json(str(aux_summary_path))
+                        gradient_audits[aux_name] = _motion_gradient_audit(
+                            aux_name, train_summaries[aux_name]
+                        )
+                else:
+                    self._event("v4_train_start", run=aux_name, steps=600)
+                    try:
+                        aux_summary = self._train_stage(
+                            aux_resolved, qpl_view, aux_name, parent_checkpoint, replay_view
+                        )
+                        train_summaries[aux_name] = aux_summary
+                        gradient_audits[aux_name] = _motion_gradient_audit(aux_name, aux_summary)
+                        if int(dict(aux_summary.get("motion_diagnostics", {})).get("motion_pairs", 0)) <= 0:
+                            raise RuntimeError("INVALID_MOTION_COVERAGE motion_pairs=0")
+                        aux_eval, aux_metrics = self._evaluate(aux_resolved, aux_summary, eval_view, aux_name)
+                        aux_record = _result_record(
+                            "S2", aux_name, aux_resolved, aux_summary, aux_eval, aux_metrics,
+                            parent_checkpoint, None, pl_path, pl_audit, memory_version,
+                            evaluation_scope="pilot",
+                        )
+                        aux_record.update({
+                            "v4_motion_label": "history GRU",
+                            "v4_semantic_condition": "conditioned",
+                            "v4_reference_update": False,
+                            "motion_diagnostics": aux_summary.get("motion_diagnostics", {}),
+                            "motion_runtime_stats": aux_summary.get("runtime_stats", {}),
+                            "motion_gradient_update_audit": gradient_audits[aux_name],
+                            "aux_gate": gate,
+                        })
+                        output[aux_name] = self._record_result(aux_name, aux_record)
+                    except Exception as exc:
+                        failed = _not_run_record("S2", aux_name, aux_resolved, str(exc), "FAILED")
+                        failed["aux_gate"] = gate
+                        output[aux_name] = self._record_result(aux_name, failed)
+            else:
+                skipped = _not_run_record(
+                    "S2", aux_name, aux_resolved,
+                    "COND did not meet all-HOTA +0.01 or all-AssA +0.02 gate",
+                    "NOT_RUN_CONDITION_NOT_MET",
+                )
+                skipped["aux_gate"] = gate
+                output[aux_name] = self._record_result(aux_name, skipped)
+
+            for run_name, record in list(output.items()):
+                if run_name not in base_methods:
+                    continue
+                if run_name not in train_summaries:
+                    summary_path = self.run_root / run_name / "train_summary.json"
+                    if summary_path.is_file():
+                        train_summaries[run_name] = _read_json(str(summary_path))
+                record = dict(record)
+                record["v4_motion_label"] = "none" if base_methods.get(run_name) == "V4-B0" else "history GRU"
+                record["v4_semantic_condition"] = (
+                    "not_applicable" if base_methods.get(run_name) == "V4-B0"
+                    else "conditioned" if base_methods.get(run_name) in {"V4-HIST-COND", "V4-HIST-COND-AUX"}
+                    else "agnostic"
+                )
+                record["v4_reference_update"] = (
+                    False if base_methods.get(run_name) == "V4-B0"
+                    else bool(dict(self._resolved(base_methods[run_name], "S2").get("motion", {})).get("reference_enabled", True))
+                )
+                record["motion_gradient_update_audit"] = gradient_audits.get(run_name, record.get("motion_gradient_update_audit", "NOT_RUN"))
+                record["motion_diagnostics"] = (train_summaries.get(run_name, {}).get("motion_diagnostics", record.get("motion_diagnostics", "NOT_RUN")))
+                record["motion_runtime_stats"] = (train_summaries.get(run_name, {}).get("runtime_stats", record.get("motion_runtime_stats", "NOT_RUN")))
+                output[run_name] = self._record_result(run_name, record)
+
+            common_rows = {}
+            for run_name in base_methods:
+                record = output.get(run_name, {})
+                thresholds = record.get("inference_thresholds", {})
+                common_rows[run_name] = {
+                    "method": run_name,
+                    "motion_mode": record.get("modules", {}).get("motion_mode", "none"),
+                    "parent_checkpoint_sha256": record.get("parent_checkpoint_sha256"),
+                    "current_view_sha256": record.get("current_view_sha256"),
+                    "replay_view_sha256": record.get("replay_view_sha256"),
+                    "qpl_manifest_sha256": record.get("pl_manifest_sha256"),
+                    "sampler_plan_sha256": record.get("sampler_plan_hash"),
+                    "eval_manifest_sha256": eval_sha,
+                    "steps": record.get("optimizer_steps", 0),
+                    "inference_thresholds": thresholds,
+                    "execution_status": record.get("execution_status", "NOT_RUN"),
+                }
+            baseline_row = common_rows.get("V4-B0-S2", {})
+            matching = []
+            compare_keys = (
+                "parent_checkpoint_sha256", "current_view_sha256", "replay_view_sha256",
+                "qpl_manifest_sha256", "sampler_plan_sha256", "eval_manifest_sha256",
+                "steps", "inference_thresholds",
+            )
+            for run_name, row in common_rows.items():
+                mismatches = [key for key in compare_keys if row.get(key) != baseline_row.get(key)]
+                status = "OK" if not mismatches else "INVALID_MOTION_CONTROL"
+                matching.append({**row, "matching_status": status, "mismatches": mismatches})
+                if mismatches and output.get(run_name, {}).get("execution_status") == "COMPLETE":
+                    invalid = dict(output[run_name])
+                    invalid["execution_status"] = "INVALID_MOTION_CONTROL"
+                    invalid["reason"] = "shared V4 artifact mismatch: %s" % mismatches
+                    output[run_name] = self._record_result(run_name, invalid)
+
+            old_admission_path = (self.previous_root / "teachers" / "S2_admission.json") if self.previous_root else Path("")
+            qpl_audit = _qpl_audit(old_admission_path, pl_audit)
+            runtime_stats_subset = {}
+            for run_name, record in output.items():
+                runtime_stats = record.get("motion_runtime_stats", {})
+                if not isinstance(runtime_stats, Mapping):
+                    runtime_stats = {}
+                runtime_stats_subset[run_name] = {
+                    key: runtime_stats.get(key, "NOT_RUN")
+                    for key in (
+                        "history_observation_count", "history_forecast_valid_count",
+                        "history_forecast_invalid_count", "history_reference_apply_count",
+                        "history_reference_warmup_skip_count", "history_reference_disabled_count",
+                        "history_observation_fallback_count", "invalid_dt_count",
+                    )
+                }
+            motion_audit = {}
+            for run_name, record in output.items():
+                resolved = self._resolved(base_methods.get(run_name, "V4-HIST-COND-AUX"), "S2") if run_name in base_methods else aux_resolved
+                motion_cfg = dict(resolved.get("motion", {}))
+                motion_diag = record.get("motion_diagnostics", {})
+                motion_audit[run_name] = {
+                    "execution_status": record.get("execution_status"),
+                    "motion_head_class": record.get("actual_modules", {}).get("motion_head_class", "NOT_RUN"),
+                    "motion_mode": motion_cfg.get("mode", "none"),
+                    "motion_implementation": motion_cfg.get("implementation", "none"),
+                    "history_length": motion_cfg.get("history_length", "NOT_RUN"),
+                    "min_history_points": motion_cfg.get("min_history_points", "NOT_RUN"),
+                    "num_modes": motion_cfg.get("num_modes", "NOT_RUN"),
+                    "semantic_dim": motion_cfg.get("semantic_dim", "NOT_RUN"),
+                    "reference_enabled": motion_cfg.get("reference_enabled", "NOT_RUN"),
+                    "motion_pairs": motion_diag.get("motion_pairs", "NOT_RUN") if isinstance(motion_diag, Mapping) else "NOT_RUN",
+                    "motion_pairs_by_class": motion_diag.get("motion_pairs_by_class", "NOT_RUN") if isinstance(motion_diag, Mapping) else "NOT_RUN",
+                    "motion_abs_state_error_sum": motion_diag.get("motion_abs_state_error_sum", "NOT_RUN") if isinstance(motion_diag, Mapping) else "NOT_RUN",
+                    "motion_forecast_iou_sum": motion_diag.get("motion_forecast_iou_sum", "NOT_RUN") if isinstance(motion_diag, Mapping) else "NOT_RUN",
+                    "runtime_stats": runtime_stats_subset.get(run_name, {}),
+                    "gradient_update_audit": record.get("motion_gradient_update_audit", "NOT_RUN"),
+                }
+
+            ordered_results = [output[name] for name in method_names if name in output]
+            if aux_name in output:
+                ordered_results.append(output[aux_name])
+            deltas = {}
+            delta_specs = (
+                ("AGN-B0", "V4-HIST-AGN-S2", "V4-B0-S2"),
+                ("COND-AGN", "V4-HIST-COND-S2", "V4-HIST-AGN-S2"),
+                ("COND-B0", "V4-HIST-COND-S2", "V4-B0-S2"),
+                ("COND-AUX", "V4-HIST-COND-S2", aux_name),
+            )
+            for delta_name, left_name, right_name in delta_specs:
+                left, right = output.get(left_name, {}), output.get(right_name, {})
+                value = {}
+                for section, key in (("all_seen_macro", "HOTA_mean"), ("all_seen_macro", "AssA_mean"), ("all_seen_macro", "DetA_mean"), ("per_class", "HOTA_mean")):
+                    if section == "per_class":
+                        left_value = _metric(left, "per_class", key) if False else _number(
+                            ((left.get("metrics", {}).get("per_class", {}) if isinstance(left.get("metrics"), Mapping) else {}).get("1122", {}) or {}).get(key)
+                        )
+                        right_value = _number(
+                            ((right.get("metrics", {}).get("per_class", {}) if isinstance(right.get("metrics"), Mapping) else {}).get("1122", {}) or {}).get(key)
+                        )
+                        metric_name = "truck_HOTA_mean"
+                    else:
+                        left_value = _metric(left, section, key)
+                        right_value = _metric(right, section, key)
+                        metric_name = key
+                    value[metric_name] = None if left_value is None or right_value is None else left_value - right_value
+                deltas[delta_name] = value
+
+            report_payload = {
+                "schema_version": "cmot.continual_v4.public_results.v1",
+                "config": {"basename": Path(self.config_path).name, "sha256": sha256_file(self.config_path)},
+                "canonical_manifest_sha256": sha256_file(self.canonical),
+                "immutable_eval_manifest_sha256": sha256_file(self.eval_slice),
+                "parent": {"method": "R-QPLSEG-S1", "checkpoint_sha256": parent_sha},
+                "source_audit": dict(self.runtime.get("source_audit", {})),
+                "download_audit": {
+                    "bulk_download": "NOT_RUN_no_new_data_or_dependency_download",
+                    "new_dependencies": "NOT_RUN",
+                    "proxy_route_check": self.runtime.get("source_audit", {}).get("route_audit", "NOT_RUN_no_download_requested"),
+                },
+                "qpl_audit": qpl_audit,
+                "aux_gate": gate,
+                "results": [_public_record(value) for value in ordered_results],
+                "deltas": deltas,
+            }
+            write_json(str(report_root / "results.json"), report_payload)
+            csv_rows = []
+            for record in ordered_results:
+                metrics = record.get("metrics", {}) if isinstance(record.get("metrics"), Mapping) else {}
+                classes = metrics.get("per_class", {}) if isinstance(metrics, Mapping) else {}
+                truck = classes.get("1122", {}) if isinstance(classes, Mapping) else {}
+                old = metrics.get("old_macro", {}) if isinstance(metrics, Mapping) else {}
+                all_seen = metrics.get("all_seen_macro", {}) if isinstance(metrics, Mapping) else {}
+                csv_rows.append({
+                    "method": record.get("method"),
+                    "motion": record.get("v4_motion_label", "NOT_RUN"),
+                    "semantic": record.get("v4_semantic_condition", "NOT_RUN"),
+                    "ref_update": record.get("v4_reference_update", "NOT_RUN"),
+                    "execution_status": record.get("execution_status", "NOT_RUN"),
+                    "optimizer_steps": record.get("optimizer_steps", 0),
+                    "old_HOTA": old.get("HOTA_mean", "NOT_RUN"),
+                    "truck_HOTA": truck.get("HOTA_mean", "NOT_RUN") if isinstance(truck, Mapping) else "NOT_RUN",
+                    "all_HOTA": all_seen.get("HOTA_mean", "NOT_RUN"),
+                    "truck_IDF1": truck.get("IDF1", "NOT_RUN") if isinstance(truck, Mapping) else "NOT_RUN",
+                    "truck_MOTA": truck.get("MOTA", "NOT_RUN") if isinstance(truck, Mapping) else "NOT_RUN",
+                    "AssA": all_seen.get("AssA_mean", "NOT_RUN"),
+                    "DetA": all_seen.get("DetA_mean", "NOT_RUN"),
+                    "motion_pairs": (record.get("motion_diagnostics", {}) or {}).get("motion_pairs", "NOT_RUN") if isinstance(record.get("motion_diagnostics"), Mapping) else "NOT_RUN",
+                    "raw_prediction_sha256": (record.get("raw_prediction") or {}).get("sha256") if isinstance(record.get("raw_prediction"), Mapping) else "NOT_RUN",
+                    "raw_metrics_sha256": (record.get("raw_metrics") or {}).get("sha256") if isinstance(record.get("raw_metrics"), Mapping) else "NOT_RUN",
+                })
+            fields = list(csv_rows[0].keys()) if csv_rows else ["method", "execution_status"]
+            with (report_root / "results.csv").open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+                writer.writeheader()
+                writer.writerows(csv_rows)
+            write_json(str(report_root / "motion_audit.json"), {
+                "schema_version": "cmot.continual_v4.motion_audit.v1",
+                "runs": motion_audit,
+            })
+            write_json(str(report_root / "artifact_matching_audit.json"), {
+                "schema_version": "cmot.continual_v4.artifact_matching.v1",
+                "required_common_fields": list(compare_keys),
+                "runs": matching,
+            })
+            (report_root / "changes.md").write_text(
+                "# C-MOT V4 历史轨迹动力学\n\n"
+                "本报告只记录实际执行状态、basename和SHA256；数据、GT、权重和服务器私有路径未进入仓库。\n\n"
+                "- parent: `R-QPLSEG-S1`, checkpoint SHA256 `%s`。\n"
+                "- S2 corrected policy: `qpl_segment_v3`; selector `qpl_segment_v3_highscore_center`。\n"
+                "- QPL v2/v3 selected-segment、frame和source-video overlap见 `results.json`。\n"
+                "- B0、history-AGN、history-COND共用同一 current/replay/QPL/sampler/eval绑定；motion mode是唯一预期差异。\n"
+                "- 训练步数均按正式 optimizer steps 记录为 600；评价范围标为 `pilot`，不称完整 benchmark。\n"
+                "- 下载与新依赖：`NOT_RUN`；本轮未下载新数据或大依赖。\n" % parent_sha,
+                encoding="utf-8",
+            )
+            known_lines = [
+                "# C-MOT V4 已知限制",
+                "",
+                "- 本轮只执行 S2 三个主 run；AUX 是否执行由报告中的固定 gate 决定。",
+                "- 运动监督只使用合法 GT/GT replay，PL 不直接进入 motion regression。",
+                "- history-AGN 的 semantic projection 若无有效语义梯度，按实际梯度审计保留该事实。",
+                "- 600 steps、固定视频清单和固定阈值属于 pilot 结果；未运行项保留 `NOT_RUN`。",
+            ]
+            if not gate["authorized"]:
+                known_lines.append("- AUX: `NOT_RUN_CONDITION_NOT_MET`，COND 未满足 all-HOTA +0.01 或 all-AssA +0.02。")
+            (report_root / "known_issues.md").write_text("\n".join(known_lines) + "\n", encoding="utf-8")
+            self.state.setdefault("artifacts", {})["v4_motion"] = {
+                "report": "reports/v4_motion",
+                "parent_checkpoint_sha256": parent_sha,
+                "current_view_sha256": current_sha,
+                "replay_view_sha256": replay_sha,
+                "qpl_manifest_sha256": qpl_manifest_sha,
+                "eval_manifest_sha256": eval_sha,
+            }
+            self._save_state()
+            self._event("v4_motion_complete", result_count=len(output))
+            return {"status": "COMPLETE", "targets": list(self.targets), "results": output}
+        except Exception as exc:
+            self._event("v4_motion_failure", type=type(exc).__name__, message=str(exc))
+            (report_root / "known_issues.md").write_text(
+                "# C-MOT V4 已知限制\n\n执行阻塞：`%s: %s`。未运行项保留 `NOT_RUN`。\n" % (type(exc).__name__, str(exc)),
+                encoding="utf-8",
+            )
+            raise
+
     def _refresh_memory_bindings(self) -> None:
         """Repair/audit replay-version fields for already completed runs.
 
@@ -2856,6 +3465,8 @@ class V3Runner:
 
     def run(self) -> dict:
         self._event("start", targets=list(self.targets), resume=self.resume)
+        if "v4_motion" in self.targets:
+            return self._run_v4_motion()
         if "controls" in self.targets:
             return self._run_controls()
         views = self._prepare_views()

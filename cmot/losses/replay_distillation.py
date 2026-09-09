@@ -107,7 +107,10 @@ class ReplayAlignedDistillation(nn.Module):
             "valid_kd_objects": 0.0,
             "kd_cells": 0.0,
             "kd_pairs": 0.0,
-            "effective_lambda": 0.0,
+            "effective_lambda_sum": 0.0,
+            "effective_lambda_count": 0.0,
+            "effective_lambda_mean": 0.0,
+            "effective_lambda_last": 0.0,
         }
 
     def set_training_step(self, step: int) -> None:
@@ -279,6 +282,9 @@ class ReplayAlignedDistillation(nn.Module):
             "valid_kd_objects": float(valid_count),
             "kd_cells": float(kd_cells),
             "kd_pairs": float(valid_count),
-            "effective_lambda": float(effective_lambda),
+            "effective_lambda_sum": float(effective_lambda),
+            "effective_lambda_count": 1.0,
+            "effective_lambda_mean": float(effective_lambda),
+            "effective_lambda_last": float(effective_lambda),
         }
         return total, dict(self.last_diagnostics)

@@ -35,18 +35,22 @@ def boxes_to_state(boxes: torch.Tensor) -> torch.Tensor:
     """Convert normalized ``cx, cy, w, h`` boxes to the model state."""
 
     boxes = boxes.float()
-    state = boxes.clone()
-    state[..., 2:] = torch.log(boxes[..., 2:].clamp(min=_EPS))
-    return state
+    # Keep the conversion purely functional.  Slicing a tensor that still
+    # participates in the motion-loss graph and assigning through that view
+    # can invalidate autograd's saved version counter on real track batches.
+    return torch.cat(
+        [boxes[..., :2], torch.log(boxes[..., 2:].clamp(min=_EPS))], dim=-1
+    )
 
 
 def state_to_boxes(state: torch.Tensor) -> torch.Tensor:
     """Convert the motion state back to bounded normalized boxes."""
 
-    boxes = state.clone()
-    boxes[..., :2] = boxes[..., :2].clamp(0.0, 1.0)
-    boxes[..., 2:] = state[..., 2:].exp().clamp(1.0e-4, 1.0)
-    return boxes
+    # As above, avoid in-place writes through ``[..., :2]``/``[..., 2:]``.
+    return torch.cat(
+        [state[..., :2].clamp(0.0, 1.0), state[..., 2:].exp().clamp(1.0e-4, 1.0)],
+        dim=-1,
+    )
 
 
 def normalized_class_evidence(logits: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
@@ -77,10 +81,16 @@ class CategoryConditionedMotionPrior(nn.Module):
         num_modes: int = 3,
         semantic_dim: int = 512,
         mode: str = "class_conditioned",
+        velocity_limit: float = 1.25,
+        min_history_points: int = 2,
     ):
         super().__init__()
         if history_length < 1 or hidden_dim < 1 or num_modes < 1:
             raise ValueError("history_length, hidden_dim and num_modes must be positive")
+        if float(velocity_limit) <= 0:
+            raise ValueError("velocity_limit must be positive")
+        if int(min_history_points) < 1:
+            raise ValueError("min_history_points must be at least one")
         mode = {"category_conditioned": "class_conditioned", "category_agnostic": "class_agnostic"}.get(mode, mode)
         if mode not in ("class_conditioned", "class_agnostic"):
             raise ValueError("mode must be class_conditioned or class_agnostic")
@@ -89,6 +99,8 @@ class CategoryConditionedMotionPrior(nn.Module):
         self.num_modes = int(num_modes)
         self.semantic_dim = int(semantic_dim)
         self.mode = mode
+        self.velocity_limit = float(velocity_limit)
+        self.min_history_points = int(min_history_points)
 
         # state (4), causal difference (4), quality (1), valid (1), delta-t (1)
         self.history_input = nn.Linear(11, 64)
@@ -175,6 +187,7 @@ class CategoryConditionedMotionPrior(nn.Module):
         previous_state = torch.zeros((n, 4), device=device, dtype=dtype)
         previous_time = torch.zeros((n,), device=device, dtype=dtype)
         has_observation = torch.zeros((n,), device=device, dtype=torch.bool)
+        valid_history_count = torch.zeros((n,), device=device, dtype=torch.long)
         last_state = torch.zeros((n, 4), device=device, dtype=dtype)
 
         for index in range(length):
@@ -183,7 +196,7 @@ class CategoryConditionedMotionPrior(nn.Module):
             finite_time = torch.isfinite(current_time)
             delta_t = current_time - previous_time
             time_ok = (~has_observation) | (finite_time & torch.isfinite(delta_t) & (delta_t > 0))
-            update = valid[:, index] & time_ok
+            update = valid[:, index] & finite_time & time_ok
             difference = current_state - previous_state
             difference = torch.where(update[:, None], difference, torch.zeros_like(difference))
             safe_dt = torch.where(update, delta_t.clamp(min=0.0), torch.zeros_like(delta_t))
@@ -199,15 +212,17 @@ class CategoryConditionedMotionPrior(nn.Module):
             )
             candidate = self.history_gru(torch.tanh(self.history_input(features)), hidden)
             hidden = torch.where(update[:, None], candidate, hidden)
-            last_state = torch.where(valid[:, index:index + 1], current_state, last_state)
-            previous_state = torch.where(valid[:, index:index + 1], current_state, previous_state)
-            previous_time = torch.where(finite_time & valid[:, index], current_time, previous_time)
-            has_observation = has_observation | valid[:, index]
+            last_state = torch.where(update[:, None], current_state, last_state)
+            previous_state = torch.where(update[:, None], current_state, previous_state)
+            previous_time = torch.where(update, current_time, previous_time)
+            has_observation = has_observation | update
+            valid_history_count = valid_history_count + update.to(torch.long)
 
         context = self._prepare_semantic(semantic_context, n, device, dtype)
         fused = self.fusion(torch.cat([hidden, self.semantic_projection(context)], dim=-1))
         velocity_mean = self.velocity_head(fused).reshape(n, self.num_modes, 4)
         velocity_mean = velocity_mean + self.semantic_residual(fused)[:, None, :]
+        velocity_mean = self.velocity_limit * torch.tanh(velocity_mean)
         velocity_log_std = self.log_std_head(fused).reshape(n, self.num_modes, 4).clamp(-5.0, 3.0)
         mixture_logits = self.mixture_head(fused)
 
@@ -217,10 +232,19 @@ class CategoryConditionedMotionPrior(nn.Module):
         if next_dt.shape != (n,):
             raise ValueError("next_delta_t must be scalar or shape [N]")
         next_dt_valid = torch.isfinite(next_dt) & (next_dt > 0)
-        forecast_valid = has_observation & next_dt_valid
-        selected_mode = mixture_logits.argmax(dim=-1)
-        selected_velocity = velocity_mean[torch.arange(n, device=device), selected_mode]
-        predicted_state = last_state + selected_velocity * next_dt[:, None]
+        # Rows without enough history carry an infinite sentinel from the
+        # caller's ``last_valid_time`` reduction.  Masking only at the final
+        # output is unsafe: ``0 * inf`` creates NaNs in the unselected branch
+        # and can still poison parameter gradients.  Use a finite zero for
+        # the arithmetic and retain the boolean validity separately.
+        safe_next_dt = torch.where(next_dt_valid, next_dt, torch.zeros_like(next_dt))
+        forecast_valid = (valid_history_count >= self.min_history_points) & next_dt_valid
+        if self.num_modes == 1:
+            selected_velocity = velocity_mean[:, 0]
+        else:
+            selected_mode = mixture_logits.argmax(dim=-1)
+            selected_velocity = velocity_mean[torch.arange(n, device=device), selected_mode]
+        predicted_state = last_state + selected_velocity * safe_next_dt[:, None]
         predicted_boxes = state_to_boxes(predicted_state)
         fallback = state_to_boxes(last_state)
         next_boxes = torch.where(forecast_valid[:, None], predicted_boxes, fallback)

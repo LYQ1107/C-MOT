@@ -227,7 +227,7 @@ def _limit_segment_length(segment: PseudoTrackSegment, max_segment_frames: Optio
     if max_segment_frames is None or int(max_segment_frames) <= 0 or segment.length <= int(max_segment_frames):
         return segment
     limit = int(max_segment_frames)
-    best = max(
+    best = min(
         range(segment.length),
         key=lambda index: (-float(segment.frames[index]["score"]), int(segment.frames[index]["frame_index"]), str(segment.frames[index].get("frame_key", ""))),
     )

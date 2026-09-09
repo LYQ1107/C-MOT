@@ -55,6 +55,10 @@ def _select_audit_parameters(model) -> Dict[str, torch.Tensor]:
         "track_embed.linear1.weight",
         "backbone.0.body.layer4.2.conv3.weight",
         "motion_head.net.1.weight",
+        "motion_head.history_input.weight",
+        "motion_head.history_gru.weight_ih",
+        "motion_head.semantic_projection.0.weight",
+        "motion_head.velocity_head.weight",
     )
     all_params = dict(model.named_parameters())
     selected = {}
@@ -444,6 +448,12 @@ def train(
         "pl_schedule_fallback_count": 0,
     }
     runtime_stats = Counter()
+    motion_diagnostics = {
+        "motion_pairs": 0,
+        "motion_pairs_by_class": Counter(),
+        "motion_abs_state_error_sum": 0.0,
+        "motion_forecast_iou_sum": 0.0,
+    }
     kd_aggregate = Counter(checkpoint_payload.get("kd_aggregate", {})) if checkpoint_payload else Counter()
     kd_replay_batches_seen = int(checkpoint_payload.get("kd_replay_batches_seen", 0)) if checkpoint_payload else 0
     distill_cfg = dict(resolved.get("distillation", {}))
@@ -461,6 +471,15 @@ def train(
                 kd_module.set_training_step(step)
             outputs = model(batch)
             loss_dict = criterion(outputs)
+            motion_diagnostics["motion_pairs"] += int(getattr(criterion, "motion_pairs", 0))
+            motion_diagnostics["motion_abs_state_error_sum"] += float(
+                getattr(criterion, "motion_abs_state_error_sum", 0.0)
+            )
+            motion_diagnostics["motion_forecast_iou_sum"] += float(
+                getattr(criterion, "motion_forecast_iou_sum", 0.0)
+            )
+            for global_id, count in getattr(criterion, "motion_pairs_by_class", {}).items():
+                motion_diagnostics["motion_pairs_by_class"][str(int(global_id))] += int(count)
             weighted_terms = []
             raw_terms = {}
             for name, value in loss_dict.items():
@@ -480,7 +499,10 @@ def train(
                 "valid_kd_objects": 0.0,
                 "kd_cells": 0.0,
                 "kd_pairs": 0.0,
-                "effective_lambda": 0.0,
+                "effective_lambda_sum": 0.0,
+                "effective_lambda_count": 0.0,
+                "effective_lambda_mean": 0.0,
+                "effective_lambda_last": 0.0,
             }
             if kd_module is not None and str(batch.get("sample_metadata", {}).get("stream", "current")) == "replay":
                 with torch.no_grad():
@@ -499,7 +521,13 @@ def train(
                 weighted_terms.append(kd_loss * float(criterion.weight_dict["loss_kd"]))
                 kd_replay_batches_seen += 1
                 for key, value in kd_diag.items():
+                    if key in ("effective_lambda_mean", "effective_lambda_last"):
+                        continue
                     kd_aggregate[key] += float(value)
+                kd_aggregate["effective_lambda_last"] = float(kd_diag.get("effective_lambda_last", 0.0))
+                count = float(kd_aggregate.get("effective_lambda_count", 0.0))
+                total_lambda = float(kd_aggregate.get("effective_lambda_sum", 0.0))
+                kd_aggregate["effective_lambda_mean"] = total_lambda / count if count > 0.0 else 0.0
                 replay_objects = float(kd_aggregate.get("replay_gt_objects", 0.0))
                 student_pass = float(kd_aggregate.get("student_iou_pass", 0.0))
                 teacher_pass = float(kd_aggregate.get("teacher_iou_pass", 0.0))
@@ -533,6 +561,14 @@ def train(
             if not _finite(loss):
                 raise FloatingPointError("non-finite total loss at step %d" % step)
             loss.backward()
+            nonfinite_gradients = [
+                name for name, parameter in model.named_parameters()
+                if parameter.grad is not None and not torch.isfinite(parameter.grad).all().item()
+            ]
+            if nonfinite_gradients:
+                raise FloatingPointError(
+                    "non-finite gradients at step %d: %s" % (step, nonfinite_gradients[:8])
+                )
             gradient_norm = float(clip_grad_norm_(model.parameters(), max_grad_norm).item())
             audit_before = _select_audit_parameters(model) if step in audit_steps else {}
             optimizer.step()
@@ -559,6 +595,10 @@ def train(
     if actual_steps != int(total_steps):
         raise RuntimeError("training ended at step %d, expected %d" % (actual_steps, int(total_steps)))
     exposure["pl_schedule_fallback_count"] = int(sampler.pl_schedule_fallback_count)
+    kd_count = float(kd_aggregate.get("effective_lambda_count", 0.0))
+    kd_sum = float(kd_aggregate.get("effective_lambda_sum", 0.0))
+    kd_aggregate["effective_lambda_mean"] = kd_sum / kd_count if kd_count > 0.0 else 0.0
+    kd_aggregate.setdefault("effective_lambda_last", 0.0)
     exposure_state = _exposure_state(exposure)
     exposure = _finalize_exposure(exposure)
     motion_cfg = dict(resolved.get("motion", {}))
@@ -588,6 +628,12 @@ def train(
             "motion_mode": motion_mode,
         },
         "actual_loss_weights": {str(key): float(value) for key, value in sorted(criterion.weight_dict.items())},
+        "motion_diagnostics": {
+            "motion_pairs": int(motion_diagnostics["motion_pairs"]),
+            "motion_pairs_by_class": dict(sorted(motion_diagnostics["motion_pairs_by_class"].items())),
+            "motion_abs_state_error_sum": float(motion_diagnostics["motion_abs_state_error_sum"]),
+            "motion_forecast_iou_sum": float(motion_diagnostics["motion_forecast_iou_sum"]),
+        },
     }
     checkpoint_path = destination / ("checkpoint_%03d.pt" % int(actual_steps))
     torch.save({
@@ -643,6 +689,12 @@ def train(
         "kd_replay_batches_seen": int(kd_replay_batches_seen),
         "actual_modules": metadata.get("actual_modules", {}),
         "actual_loss_weights": metadata.get("actual_loss_weights", {}),
+        "motion_diagnostics": metadata.get("motion_diagnostics", {
+            "motion_pairs": 0,
+            "motion_pairs_by_class": {},
+            "motion_abs_state_error_sum": 0.0,
+            "motion_forecast_iou_sum": 0.0,
+        }),
         "step_log": step_log.name,
         "elapsed_s": round(time.time() - started, 3),
     }

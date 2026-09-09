@@ -46,6 +46,15 @@ V3_NESTED_KEYS = {
     "diagnosis": {"max_videos", "max_frames_per_video", "visualization_frames"},
 }
 
+# V4 deliberately has its own schema contract.  Keep the V3 key set intact so
+# old curricula continue to reject V4-only knobs rather than silently ignoring
+# them.
+V4_NESTED_KEYS = {name: set(keys) for name, keys in V3_NESTED_KEYS.items()}
+V4_NESTED_KEYS["motion"].update({
+    "history_length", "history_hidden_dim", "num_modes", "semantic_dim",
+    "min_history_points", "detach_history", "reference_enabled",
+})
+
 
 def _validate_nested(value: dict, allowed: Mapping[str, set], label: str) -> None:
     for name, keys in allowed.items():
@@ -82,6 +91,28 @@ def _validate_v3(value: dict) -> None:
         raise ValueError("continual_v3 inference thresholds must be probabilities")
 
 
+def _validate_v4(value: dict) -> None:
+    _validate_nested(value, V4_NESTED_KEYS, "continual_v4")
+    motion = value.get("motion", {})
+    if motion.get("implementation", "none") not in ("none", "history_gru_v1"):
+        raise ValueError("continual_v4 motion implementation is not connected")
+    if motion.get("mode", "none") not in (
+        "none", "history_agnostic_v1", "history_conditioned_v1"
+    ):
+        raise ValueError("continual_v4 motion mode is not connected")
+    if int(motion.get("num_modes", 1)) != 1:
+        raise ValueError("continual_v4 requires num_modes=1")
+    if int(motion.get("min_history_points", 2)) < 1:
+        raise ValueError("continual_v4 min_history_points must be at least one")
+    inference = value.get("inference", {})
+    required = ("birth_threshold", "keep_threshold", "export_threshold", "duplicate_feature_cos")
+    missing = [key for key in required if key not in inference]
+    if missing:
+        raise ValueError("continual_v4 inference contract missing: %s" % ",".join(missing))
+    if not 0 <= float(inference["birth_threshold"]) <= 1 or not 0 <= float(inference["export_threshold"]) <= 1:
+        raise ValueError("continual_v4 inference thresholds must be probabilities")
+
+
 def load_config(path: str) -> dict:
     with Path(path).open("r", encoding="utf-8") as handle:
         value = yaml.safe_load(handle)
@@ -97,6 +128,8 @@ def load_config(path: str) -> dict:
         _validate_v2(value)
     elif schema == "cmot.continual_v3":
         _validate_v3(value)
+    elif schema == "cmot.continual_v4":
+        _validate_v4(value)
     elif schema == "cmot.curriculum.v1":
         _validate_nested(value, V2_NESTED_KEYS, "curriculum")
     else:
@@ -119,7 +152,7 @@ def _stage_ids(stage: str) -> dict:
         "S2": {"active_global_ids": [206, 792, 1122], "new_global_ids": [1122], "old_global_ids": [206, 792], "label_mode": "partial", "protocol_role": "cil"},
     }
     if stage not in values:
-        raise ValueError("continual_v3 stage must be S0, J3, S1 or S2")
+        raise ValueError("continual stage must be S0, J3, S1 or S2")
     return dict(values[stage])
 
 
@@ -143,9 +176,13 @@ def _method_flags(method: str, stage: str) -> dict:
         "R-QPL-KD-S2": (True, True, False),
         "O1-residual-v2": (True, False, True),
         "O2-residual-v2": (True, True, True),
+        "V4-B0": (True, False, False),
+        "V4-HIST-AGN": (True, False, True),
+        "V4-HIST-COND": (True, False, True),
+        "V4-HIST-COND-AUX": (True, False, True),
     }
     if method not in methods:
-        raise ValueError("unknown continual_v3 method %s" % method)
+        raise ValueError("unknown continual method %s" % method)
     enable_pl, enable_kd, enable_motion = methods[method]
     if stage in ("S0", "J3"):
         enable_pl = enable_kd = enable_motion = False
@@ -159,8 +196,10 @@ def resolve_runtime_config(curriculum: dict, runtime_paths: Mapping[str, Any], m
         _validate_v2(curriculum)
     elif schema == "cmot.continual_v3":
         _validate_v3(curriculum)
+    elif schema == "cmot.continual_v4":
+        _validate_v4(curriculum)
     else:
-        raise ValueError("resolve_runtime_config requires a V2 or V3 curriculum")
+        raise ValueError("resolve_runtime_config requires a V2, V3 or V4 curriculum")
     resolved = _copy_sections(curriculum)
     resolved["runtime_paths"] = dict(runtime_paths)
     resolved["method"] = str(method)
@@ -172,12 +211,25 @@ def resolve_runtime_config(curriculum: dict, runtime_paths: Mapping[str, Any], m
     if not flags["enable_motion"]:
         motion["implementation"] = "none"
         motion["mode"] = "none"
-    elif str(method).startswith("O1"):
+    elif str(method) == "O1-residual-v2":
         motion["implementation"] = "one_step_residual_v2"
         motion["mode"] = "one_step_agnostic_v2"
-    else:
+    elif str(method) == "O2-residual-v2":
         motion["implementation"] = "one_step_residual_v2"
         motion["mode"] = "one_step_conditioned_v2"
+    elif str(method) == "V4-HIST-AGN":
+        motion["implementation"] = "history_gru_v1"
+        motion["mode"] = "history_agnostic_v1"
+        motion["reference_enabled"] = True
+    elif str(method) in ("V4-HIST-COND", "V4-HIST-COND-AUX"):
+        motion["implementation"] = "history_gru_v1"
+        motion["mode"] = "history_conditioned_v1"
+        motion["reference_enabled"] = str(method) != "V4-HIST-COND-AUX"
+    elif str(method) == "V4-B0":
+        motion["implementation"] = "none"
+        motion["mode"] = "none"
+    else:
+        raise ValueError("motion-enabled method has no explicit mapping: %s" % method)
     resolved["motion"] = motion
     inference = dict(resolved.get("inference", {}))
     # V2 names remain readable, but V3 always materializes the new contract.

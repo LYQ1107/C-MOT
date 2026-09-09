@@ -1,0 +1,126 @@
+project: C-MOT
+schema_version: cmot.continual_v4
+seed: 20260907
+network:
+  bulk_policy: direct-only
+  require_route_audit: true
+  fallback_to_proxy: false
+resources:
+  protected_gpu_ids: [2, 3, 4]
+  max_gpus: 1
+  max_concurrent_trainers: 1
+  dataloader_workers_per_trainer: 0
+protocol:
+  name: bdd_continual_learning_v4
+  class_order: [[car], [pedestrian], [truck]]
+  train_source_cap: 32
+  dev_source_cap: 8
+  calibration_source_cap: 8
+  eval_video_cap: 16
+  eval_manifest_is_immutable: true
+  train_split: train
+  eval_split: val
+training:
+  batch_size_per_gpu: 1
+  clip_frames: 4
+  workers: 0
+  s0_steps: 1200
+  joint_steps: 1200
+  incremental_steps: 600
+  s2_steps: 600
+  early_eval_optimizer_steps: 600
+  extension_steps: 1200
+  max_optimizer_steps_per_stage: 2400
+  gradient_audit_every: 100
+  lr_backbone: 0.000002
+  lr_heads: 0.00002
+  lr_motion: 0.0002
+  weight_decay: 0.0001
+  max_grad_norm: 0.1
+  input_size: [640, 360]
+motion:
+  enabled: false
+  implementation: history_gru_v1
+  mode: none
+  history_length: 4
+  history_hidden_dim: 128
+  num_modes: 1
+  semantic_dim: 512
+  min_history_points: 2
+  velocity_limit: 1.25
+  detach_features: true
+  detach_history: true
+  detach_reference: true
+  reference_enabled: true
+  warmup_steps: 20
+  lambda_motion: 0.1
+  max_dt: 2.0
+replay:
+  budget_mib: 512
+  training_budget_mib: 448
+  calibration_budget_mib: 64
+  ratio_schedule: [current, replay]
+  clip_len: 4
+  negative_fraction: 0.2
+supervision:
+  lambda_gt: 1.0
+  lambda_pl: 0.25
+  pl_warmup_steps: 100
+  quality_iou_min: 0.5
+  conflict_iou: 0.7
+  pl_duplicate_iou: 0.7
+pseudo:
+  enabled: true
+  policy_version: qpl_segment_v3
+  per_class_threshold: {}
+  per_class_cap: {}
+  total_cap: 40
+  total_segment_cap: 40
+  per_class_segment_cap: {206: 20, 792: 20}
+  max_segment_frames: 8
+  total_frame_cap: 256
+  pl_clip_fraction: 0.25
+  min_segment_frames: 3
+  max_gap_s: 1.0
+  calibration_version: wilson95_iou50_v1
+calibration:
+  thresholds: [0.5, 0.6, 0.7, 0.8, 0.9]
+  min_predictions: 30
+  min_videos: 3
+  wilson_lower_min: 0.8
+  iou_min: 0.5
+  source_split: calibration
+distillation:
+  enabled: false
+  temperature: 2.0
+  lambda_kd: 0.25
+  warmup_steps: 100
+  iou_min: 0.5
+  score_min: 0.5
+  fail_fast_replay_batches: 8
+  cache_enabled: false
+inference:
+  birth_threshold: 0.50
+  keep_threshold: 0.20
+  export_threshold: 0.50
+  miss_tolerance: 5
+  duplicate_iou: 0.85
+  duplicate_feature_cos: 0.95
+  maximum_quantity: 160
+  dedup_new_new: true
+  dedup_new_track: true
+  merge_existing_ids: false
+  inference_dedup_enabled: true
+evaluation:
+  manifest: immutable_eval_slice
+  classes: [pedestrian, car, truck]
+  thresholds: 19
+  primary_metric: HOTA_mean
+report:
+  redact_private_paths: true
+  allow_estimated_metrics: false
+  require_raw_metrics: true
+diagnosis:
+  max_videos: 4
+  max_frames_per_video: 80
+  visualization_frames: 4

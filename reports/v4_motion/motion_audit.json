@@ -1,0 +1,237 @@
+{
+  "runs": {
+    "V4-B0-S2": {
+      "execution_status": "COMPLETE",
+      "gradient_update_audit": {
+        "history_gru": "NOT_RUN",
+        "history_input": "NOT_RUN",
+        "semantic_projection": "NOT_RUN",
+        "velocity_head": "NOT_RUN"
+      },
+      "history_length": 4,
+      "min_history_points": 2,
+      "motion_abs_state_error_sum": 0.0,
+      "motion_forecast_iou_sum": 0.0,
+      "motion_head_class": null,
+      "motion_implementation": "none",
+      "motion_mode": "none",
+      "motion_pairs": 0,
+      "motion_pairs_by_class": {},
+      "num_modes": 1,
+      "reference_enabled": true,
+      "runtime_stats": {
+        "history_forecast_invalid_count": 0,
+        "history_forecast_valid_count": 0,
+        "history_observation_count": 0,
+        "history_observation_fallback_count": 0,
+        "history_reference_apply_count": 0,
+        "history_reference_disabled_count": 0,
+        "history_reference_warmup_skip_count": 0,
+        "invalid_dt_count": 0
+      },
+      "semantic_dim": 512
+    },
+    "V4-HIST-AGN-S2": {
+      "execution_status": "COMPLETE",
+      "gradient_update_audit": {
+        "history_gru": {
+          "audit_count": 7,
+          "effective_gradient_observed": true,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 2.415714845938055e-07,
+          "last_update_norm": 0.0006875356193631887,
+          "status": "OK"
+        },
+        "history_input": {
+          "audit_count": 7,
+          "effective_gradient_observed": true,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 1.0861028698627706e-07,
+          "last_update_norm": 0.0002106236934196204,
+          "status": "OK"
+        },
+        "semantic_projection": {
+          "audit_count": 7,
+          "effective_gradient_observed": false,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 0.0,
+          "last_update_norm": 0.0,
+          "status": "OK"
+        },
+        "velocity_head": {
+          "audit_count": 7,
+          "effective_gradient_observed": true,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 5.133640570420539e-06,
+          "last_update_norm": 0.0008118421537801623,
+          "status": "OK"
+        }
+      },
+      "history_length": 4,
+      "min_history_points": 2,
+      "motion_abs_state_error_sum": 606.5923467501998,
+      "motion_forecast_iou_sum": 1510.358450976084,
+      "motion_head_class": "CategoryConditionedMotionPrior",
+      "motion_implementation": "history_gru_v1",
+      "motion_mode": "history_agnostic_v1",
+      "motion_pairs": 2645,
+      "motion_pairs_by_class": {
+        "1122": 529,
+        "206": 1772,
+        "792": 344
+      },
+      "num_modes": 1,
+      "reference_enabled": true,
+      "runtime_stats": {
+        "history_forecast_invalid_count": 2398,
+        "history_forecast_valid_count": 2840,
+        "history_observation_count": 6718,
+        "history_observation_fallback_count": 0,
+        "history_reference_apply_count": 2749,
+        "history_reference_disabled_count": 0,
+        "history_reference_warmup_skip_count": 91,
+        "invalid_dt_count": 0
+      },
+      "semantic_dim": 512
+    },
+    "V4-HIST-COND-AUX-S2": {
+      "execution_status": "COMPLETE",
+      "gradient_update_audit": {
+        "history_gru": {
+          "audit_count": 7,
+          "effective_gradient_observed": true,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 2.4136201659530343e-07,
+          "last_update_norm": 0.0008848337456583977,
+          "status": "OK"
+        },
+        "history_input": {
+          "audit_count": 7,
+          "effective_gradient_observed": true,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 1.0219003598876952e-07,
+          "last_update_norm": 0.00023908595903776586,
+          "status": "OK"
+        },
+        "semantic_projection": {
+          "audit_count": 7,
+          "effective_gradient_observed": true,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 5.66555684144987e-07,
+          "last_update_norm": 0.0013420277973636985,
+          "status": "OK"
+        },
+        "velocity_head": {
+          "audit_count": 7,
+          "effective_gradient_observed": true,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 4.498785528994631e-06,
+          "last_update_norm": 0.0006988371605984867,
+          "status": "OK"
+        }
+      },
+      "history_length": 4,
+      "min_history_points": 2,
+      "motion_abs_state_error_sum": 614.1809180416167,
+      "motion_forecast_iou_sum": 1532.6313085001893,
+      "motion_head_class": "CategoryConditionedMotionPrior",
+      "motion_implementation": "history_gru_v1",
+      "motion_mode": "history_conditioned_v1",
+      "motion_pairs": 2686,
+      "motion_pairs_by_class": {
+        "1122": 523,
+        "206": 1808,
+        "792": 355
+      },
+      "num_modes": 1,
+      "reference_enabled": false,
+      "runtime_stats": {
+        "history_forecast_invalid_count": 2400,
+        "history_forecast_valid_count": 2879,
+        "history_observation_count": 6772,
+        "history_observation_fallback_count": 0,
+        "history_reference_apply_count": 0,
+        "history_reference_disabled_count": 2788,
+        "history_reference_warmup_skip_count": 91,
+        "invalid_dt_count": 0
+      },
+      "semantic_dim": 512
+    },
+    "V4-HIST-COND-S2": {
+      "execution_status": "COMPLETE",
+      "gradient_update_audit": {
+        "history_gru": {
+          "audit_count": 7,
+          "effective_gradient_observed": true,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 2.1581652731583745e-07,
+          "last_update_norm": 0.0007911081775091588,
+          "status": "OK"
+        },
+        "history_input": {
+          "audit_count": 7,
+          "effective_gradient_observed": true,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 9.633770048367296e-08,
+          "last_update_norm": 0.0002315923193236813,
+          "status": "OK"
+        },
+        "semantic_projection": {
+          "audit_count": 7,
+          "effective_gradient_observed": true,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 3.6275929460316547e-07,
+          "last_update_norm": 0.0011228240327909589,
+          "status": "OK"
+        },
+        "velocity_head": {
+          "audit_count": 7,
+          "effective_gradient_observed": true,
+          "grad_finite_all": true,
+          "grad_present_all": true,
+          "last_grad_norm": 3.98697966375039e-06,
+          "last_update_norm": 0.0007333438261412084,
+          "status": "OK"
+        }
+      },
+      "history_length": 4,
+      "min_history_points": 2,
+      "motion_abs_state_error_sum": 611.7365096583962,
+      "motion_forecast_iou_sum": 1558.0847987167072,
+      "motion_head_class": "CategoryConditionedMotionPrior",
+      "motion_implementation": "history_gru_v1",
+      "motion_mode": "history_conditioned_v1",
+      "motion_pairs": 2669,
+      "motion_pairs_by_class": {
+        "1122": 539,
+        "206": 1784,
+        "792": 346
+      },
+      "num_modes": 1,
+      "reference_enabled": true,
+      "runtime_stats": {
+        "history_forecast_invalid_count": 2404,
+        "history_forecast_valid_count": 2865,
+        "history_observation_count": 6744,
+        "history_observation_fallback_count": 0,
+        "history_reference_apply_count": 2774,
+        "history_reference_disabled_count": 0,
+        "history_reference_warmup_skip_count": 91,
+        "invalid_dt_count": 0
+      },
+      "semantic_dim": 512
+    }
+  },
+  "schema_version": "cmot.continual_v4.motion_audit.v1"
+}

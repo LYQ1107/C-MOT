@@ -131,8 +131,9 @@ def _validate_pl_segments(
     metadata: Mapping[str, object],
     max_gap_s: float,
 ) -> None:
-    """Reject malformed qpl_segment_v2 records before view construction."""
-    if metadata.get("pseudo_policy_version") != "qpl_segment_v2":
+    """Reject malformed versioned QPL segment records before view construction."""
+    policy_version = str(metadata.get("pseudo_policy_version", ""))
+    if policy_version not in ("qpl_segment_v2", "qpl_segment_v3"):
         return
     grouped = defaultdict(list)
     for frame_key, predictions in frame_records.items():
@@ -140,16 +141,16 @@ def _validate_pl_segments(
             segment_id = prediction.get("pl_segment_id")
             required = (segment_id, prediction.get("segment_length"), prediction.get("segment_reliability"), prediction.get("segment_mean_score"))
             if not segment_id or any(value is None for value in required[1:]):
-                raise ValueError("qpl_segment_v2 prediction is missing segment metadata: %s" % frame_key)
+                raise ValueError("%s prediction is missing segment metadata: %s" % (policy_version, frame_key))
             try:
                 frame_index = int(prediction["frame_index"])
                 segment_length = int(prediction["segment_length"])
                 reliability = float(prediction["segment_reliability"])
                 mean_score = float(prediction["segment_mean_score"])
             except (KeyError, TypeError, ValueError):
-                raise ValueError("qpl_segment_v2 prediction has invalid segment metadata: %s" % frame_key)
+                raise ValueError("%s prediction has invalid segment metadata: %s" % (policy_version, frame_key))
             if segment_length <= 0 or not math.isfinite(reliability) or not math.isfinite(mean_score):
-                raise ValueError("qpl_segment_v2 prediction has non-finite segment metadata: %s" % frame_key)
+                raise ValueError("%s prediction has non-finite segment metadata: %s" % (policy_version, frame_key))
             grouped[str(segment_id)].append((str(frame_key), frame_index, prediction))
     for segment_id, values in grouped.items():
         values.sort(key=lambda item: (item[1], item[0]))
@@ -174,7 +175,9 @@ def _validate_pl_segments(
                     raise ValueError("qpl segment timestamp gap is invalid: %s" % segment_id)
 
 
-def _validate_output_pl_segments(videos: Sequence[Mapping[str, object]], max_gap_s: float) -> None:
+def _validate_output_pl_segments(
+    videos: Sequence[Mapping[str, object]], max_gap_s: float, policy_version: str
+) -> None:
     grouped = defaultdict(list)
     for video in videos:
         for frame in video.get("frames", []):
@@ -187,7 +190,7 @@ def _validate_output_pl_segments(videos: Sequence[Mapping[str, object]], max_gap
                 value["frame_key"] = str(frame.get("frame_key", ""))
                 value["timestamp_s"] = frame.get("timestamp_s")
                 grouped[str(ann.get("pl_segment_id"))].append(value)
-    _validate_pl_segments(grouped, {"pseudo_policy_version": "qpl_segment_v2"}, max_gap_s)
+    _validate_pl_segments(grouped, {"pseudo_policy_version": policy_version}, max_gap_s)
 
 
 def _eligible(video: Mapping[str, object], new_ids: Sequence[int]) -> bool:
@@ -278,7 +281,8 @@ def build_view(
     selected = set(str(v) for v in video_ids)
     pl, pl_metadata, pl_stats = _load_pl(pl_path if enable_pl else None, old_ids)
     stage_stats = Counter(pl_stats)
-    qpl_segment_mode = bool(enable_pl and pl_metadata.get("pseudo_policy_version") == "qpl_segment_v2")
+    qpl_policy_version = str(pl_metadata.get("pseudo_policy_version", ""))
+    qpl_segment_mode = bool(enable_pl and qpl_policy_version in ("qpl_segment_v2", "qpl_segment_v3"))
     if qpl_segment_mode:
         _validate_pl_segments(pl, pl_metadata, max_gap_s)
     if enable_pl and pl_path and not pl_metadata.get("teacher_checkpoint_sha256"):
@@ -313,7 +317,8 @@ def build_view(
                 candidates = []
                 if enable_pl:
                     for pred in sorted(pl.get(str(frame.get("frame_key")), []), key=lambda x: (-float(x["score"]), x["pl_identity"])):
-                        # qpl_segment_v2 has already applied its only budget at
+                        # Versioned qpl_segment policies have already applied
+                        # their only budget at
                         # segment level.  Legacy V2/V3 snapshots retain the
                         # old frame cap solely for backwards compatibility.
                         if not qpl_segment_mode and total_pl_cap is not None and total_pl >= int(total_pl_cap):
@@ -334,7 +339,7 @@ def build_view(
                             # A prevalidated segment cannot lose a frame here:
                             # doing so would silently violate its continuity.
                             reason = "GT conflict" if has_conflict else "duplicate"
-                            raise ValueError("qpl_segment_v2 %s at frame %s" % (reason, frame.get("frame_key")))
+                            raise ValueError("%s %s at frame %s" % (qpl_policy_version, reason, frame.get("frame_key")))
                         if has_conflict:
                             stage_stats["gt_pl_conflict"] += 1
                             continue
@@ -360,7 +365,7 @@ def build_view(
                 new_video["split"] = str(output_split)
             output_videos.append(new_video)
     if qpl_segment_mode:
-        _validate_output_pl_segments(output_videos, max_gap_s)
+        _validate_output_pl_segments(output_videos, max_gap_s, qpl_policy_version)
     result = {
         "schema_version": "cmot.continual_v3.view",
         "view_kind": "current" if mode == "train" else "evaluation",
