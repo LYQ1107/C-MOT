@@ -33,9 +33,13 @@ V3_NESTED_KEYS = {
     "motion": {"enabled", "implementation", "mode", "velocity_limit", "detach_features", "detach_reference", "warmup_steps", "lambda_motion", "max_dt"},
     "replay": {"budget_mib", "training_budget_mib", "calibration_budget_mib", "ratio_schedule", "clip_len", "negative_fraction"},
     "supervision": {"lambda_gt", "lambda_pl", "pl_warmup_steps", "quality_iou_min", "conflict_iou", "pl_duplicate_iou"},
-    "pseudo": {"enabled", "per_class_threshold", "per_class_cap", "total_cap", "min_segment_frames", "max_gap_s", "calibration_version"},
+    "pseudo": {
+        "enabled", "policy_version", "per_class_threshold", "per_class_cap", "total_cap",
+        "total_segment_cap", "per_class_segment_cap", "max_segment_frames", "total_frame_cap",
+        "pl_clip_fraction", "min_segment_frames", "max_gap_s", "calibration_version",
+    },
     "calibration": {"thresholds", "min_predictions", "min_videos", "wilson_lower_min", "iou_min", "source_split"},
-    "distillation": {"enabled", "temperature", "lambda_kd", "warmup_steps", "iou_min", "score_min", "cache_enabled"},
+    "distillation": {"enabled", "temperature", "lambda_kd", "warmup_steps", "iou_min", "score_min", "cache_enabled", "fail_fast_replay_batches"},
     "inference": {"birth_threshold", "keep_threshold", "export_threshold", "miss_tolerance", "duplicate_iou", "duplicate_feature_cos", "maximum_quantity", "dedup_new_new", "dedup_new_track", "merge_existing_ids", "inference_dedup_enabled"},
     "evaluation": {"manifest", "classes", "thresholds", "primary_metric"},
     "report": {"redact_private_paths", "allow_estimated_metrics", "require_raw_metrics"},
@@ -126,6 +130,9 @@ def _method_flags(method: str, stage: str) -> dict:
         "R-ER": (False, False, False),
         "R-QPL": (True, False, False),
         "R-QPL-KD": (True, True, False),
+        "R-QPLSEG": (True, False, False),
+        "R-QPLSEG-KD": (True, True, False),
+        "R-QPLSEG-PF": (True, False, False),
         "S2-R-ER": (False, False, False),
         "S2-R-QPL-KD": (True, True, False),
         "R-ER-S2": (False, False, False),
@@ -203,7 +210,19 @@ def resolve_runtime_config(curriculum: dict, runtime_paths: Mapping[str, Any], m
     replay = dict(resolved.get("replay", {}))
     replay.setdefault("ratio_schedule", ["current", "replay"])
     replay.setdefault("clip_len", training.get("clip_frames", 4))
+    if str(method) == "R-QPLSEG-PF":
+        replay["ratio_schedule"] = ["current", "current", "current", "replay"]
     resolved["replay"] = replay
+    pseudo = dict(resolved.get("pseudo", {}))
+    pseudo.setdefault("policy_version", "qpl_segment_v2")
+    pseudo.setdefault("total_segment_cap", 40)
+    pseudo.setdefault("per_class_segment_cap", {})
+    pseudo.setdefault("max_segment_frames", 8)
+    pseudo.setdefault("total_frame_cap", 256)
+    pseudo.setdefault("pl_clip_fraction", 0.25)
+    pseudo.setdefault("min_segment_frames", 3)
+    pseudo.setdefault("max_gap_s", 1.0)
+    resolved["pseudo"] = pseudo
     calibration = dict(resolved.get("calibration", {}))
     calibration.setdefault("thresholds", [0.5, 0.6, 0.7, 0.8, 0.9])
     calibration.setdefault("min_predictions", 30)
@@ -217,6 +236,7 @@ def resolve_runtime_config(curriculum: dict, runtime_paths: Mapping[str, Any], m
     distillation.setdefault("warmup_steps", 100)
     distillation.setdefault("iou_min", 0.5)
     distillation.setdefault("score_min", 0.5)
+    distillation.setdefault("fail_fast_replay_batches", 8)
     distillation["enabled"] = bool(distillation.get("enabled", True)) and bool(flags["enable_kd"])
     resolved["distillation"] = distillation
     resolved["actual_consumers"] = {

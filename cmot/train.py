@@ -24,6 +24,17 @@ from .ovtr_runtime import load_checkpoint, make_model
 from .losses.replay_distillation import ReplayAlignedDistillation
 
 
+class KDAlignmentBlocked(RuntimeError):
+    """Raised when replay KD reaches its configured fail-fast gate."""
+
+    def __init__(self, status: str, step: int, diagnostics: Mapping[str, object], aggregate: Mapping[str, object]):
+        self.status = str(status)
+        self.step = int(step)
+        self.diagnostics = dict(diagnostics)
+        self.aggregate = dict(aggregate)
+        super().__init__("%s at step %d: %s" % (self.status, self.step, json.dumps(self.diagnostics, sort_keys=True)))
+
+
 def _move_batch(batch: dict, device: torch.device) -> dict:
     return {
         "imgs": [value.to(device, non_blocking=True) for value in batch["imgs"]],
@@ -139,6 +150,11 @@ def _exposure_update(exposure: dict, batch: dict) -> None:
     exposure["steps_by_stream"][stream] += 1
     exposure["clips_by_stream"][stream] += 1
     exposure["clip_ids"].add(str(sample.get("clip_id", "")))
+    if stream == "current" and bool(sample.get("has_pl", False)):
+        exposure.setdefault("pl_segment_ids_seen", set()).update(
+            str(value) for value in sample.get("pl_segment_ids", []) if value
+        )
+        exposure["pl_segment_clip_steps"] += 1
     exposure["video_ids"].update(str(meta.get("video_id", "")) for meta in batch.get("frame_metadata", []))
     exposure.setdefault("source_video_uids", set()).update(
         str(meta.get("source_video_uid", meta.get("source_video_id", "")))
@@ -157,6 +173,8 @@ def _exposure_update(exposure: dict, batch: dict) -> None:
             exposure["annotations_by_source"][source] += 1
             exposure["annotations_by_global_id"][gid] += 1
             exposure.setdefault("annotations_by_source_class", Counter())[source + ":" + gid] += 1
+            if source == "pl":
+                exposure["pl_annotations_seen"] += 1
 
 
 def _finalize_exposure(exposure: dict) -> dict:
@@ -170,6 +188,9 @@ def _finalize_exposure(exposure: dict) -> dict:
         sorted(result["annotations_by_global_id"].items(), key=lambda item: int(item[0]))
     )
     result["annotations_by_source_class"] = dict(sorted(result.get("annotations_by_source_class", {}).items()))
+    result["pl_segments_unique_seen"] = len(result.pop("pl_segment_ids_seen", set()))
+    result["pl_segment_clip_steps"] = int(result.get("pl_segment_clip_steps", 0))
+    result["pl_annotations_seen"] = int(result.get("pl_annotations_seen", result["annotations_by_source"].get("pl", 0)))
     return result
 
 
@@ -186,6 +207,10 @@ def _exposure_state(exposure: dict) -> dict:
         "annotations_by_source": dict(exposure["annotations_by_source"]),
         "annotations_by_global_id": dict(exposure["annotations_by_global_id"]),
         "annotations_by_source_class": dict(exposure.get("annotations_by_source_class", Counter())),
+        "pl_segment_ids_seen": sorted(exposure.get("pl_segment_ids_seen", set())),
+        "pl_segment_clip_steps": int(exposure.get("pl_segment_clip_steps", 0)),
+        "pl_annotations_seen": int(exposure.get("pl_annotations_seen", 0)),
+        "pl_schedule_fallback_count": int(exposure.get("pl_schedule_fallback_count", 0)),
     }
 
 
@@ -201,6 +226,10 @@ def _restore_exposure(state: Mapping[str, object]) -> dict:
         "annotations_by_source": Counter(state.get("annotations_by_source", {})),
         "annotations_by_global_id": Counter(state.get("annotations_by_global_id", {})),
         "annotations_by_source_class": Counter(state.get("annotations_by_source_class", {})),
+        "pl_segment_ids_seen": set(str(v) for v in state.get("pl_segment_ids_seen", [])),
+        "pl_segment_clip_steps": int(state.get("pl_segment_clip_steps", 0)),
+        "pl_annotations_seen": int(state.get("pl_annotations_seen", 0)),
+        "pl_schedule_fallback_count": int(state.get("pl_schedule_fallback_count", 0)),
     }
 
 
@@ -374,6 +403,9 @@ def train(
         seed=seed,
         stage_id=str(resolved.get("stage", destination.name)),
         stream_schedule=tuple(replay_cfg.get("ratio_schedule", ("current", "current", "current", "replay"))),
+        negative_fraction=float(replay_cfg.get("negative_fraction", 0.2)),
+        pl_clip_fraction=float(dict(resolved.get("pseudo", {})).get("pl_clip_fraction", 0.0)),
+        enable_pl=bool(resolved.get("enable_pl", False)),
     )
     if checkpoint_payload is not None:
         sampler.load_state_dict(checkpoint_payload.get("sampler_state", {}))
@@ -406,9 +438,16 @@ def train(
         "annotations_by_source": Counter(),
         "annotations_by_global_id": Counter(),
         "annotations_by_source_class": Counter(),
+        "pl_segment_ids_seen": set(),
+        "pl_segment_clip_steps": 0,
+        "pl_annotations_seen": 0,
+        "pl_schedule_fallback_count": 0,
     }
     runtime_stats = Counter()
     kd_aggregate = Counter(checkpoint_payload.get("kd_aggregate", {})) if checkpoint_payload else Counter()
+    kd_replay_batches_seen = int(checkpoint_payload.get("kd_replay_batches_seen", 0)) if checkpoint_payload else 0
+    distill_cfg = dict(resolved.get("distillation", {}))
+    fail_fast_replay_batches = int(distill_cfg.get("fail_fast_replay_batches", 8))
     actual_steps = start_step
     with step_log.open(log_mode, encoding="utf-8") as log_handle:
         for step, raw_batch in enumerate(loader, start=start_step + 1):
@@ -433,7 +472,13 @@ def train(
                 weighted_terms.append(value * float(criterion.weight_dict[name]))
             kd_diag = {
                 "replay_gt_objects": 0.0,
+                "student_iou_pass": 0.0,
+                "teacher_iou_pass": 0.0,
+                "joint_alignment_pass": 0.0,
+                "shared_old_class_objects": 0.0,
+                "teacher_score_pass": 0.0,
                 "valid_kd_objects": 0.0,
+                "kd_cells": 0.0,
                 "kd_pairs": 0.0,
                 "effective_lambda": 0.0,
             }
@@ -452,6 +497,36 @@ def train(
                     raise FloatingPointError("non-finite loss_kd at step %d" % step)
                 raw_terms["loss_kd"] = float(kd_loss.detach().item())
                 weighted_terms.append(kd_loss * float(criterion.weight_dict["loss_kd"]))
+                kd_replay_batches_seen += 1
+                for key, value in kd_diag.items():
+                    kd_aggregate[key] += float(value)
+                replay_objects = float(kd_aggregate.get("replay_gt_objects", 0.0))
+                student_pass = float(kd_aggregate.get("student_iou_pass", 0.0))
+                teacher_pass = float(kd_aggregate.get("teacher_iou_pass", 0.0))
+                valid_objects = float(kd_aggregate.get("valid_kd_objects", 0.0))
+                if kd_replay_batches_seen >= fail_fast_replay_batches and replay_objects > 0.0:
+                    if student_pass <= 0.0 and teacher_pass <= 0.0:
+                        blocked_status = "BLOCKED_KD_NO_STUDENT_OR_TEACHER_IOU"
+                    elif student_pass <= 0.0:
+                        blocked_status = "BLOCKED_KD_NO_STUDENT_IOU"
+                    elif teacher_pass <= 0.0:
+                        blocked_status = "BLOCKED_KD_NO_TEACHER_IOU"
+                    elif valid_objects <= 0.0:
+                        blocked_status = "BLOCKED_KD_NO_VALID_ALIGNMENT"
+                    else:
+                        blocked_status = None
+                    if blocked_status is not None:
+                        failure = {
+                            "status": blocked_status,
+                            "step": int(step),
+                            "kd_replay_batches_seen": int(kd_replay_batches_seen),
+                            "last_diagnostics": dict(kd_diag),
+                            "kd_aggregate": dict(kd_aggregate),
+                        }
+                        write_json(str(destination / "kd_fail_fast.json"), failure)
+                        aggregate_with_batches = dict(kd_aggregate)
+                        aggregate_with_batches["kd_replay_batches_seen"] = int(kd_replay_batches_seen)
+                        raise KDAlignmentBlocked(blocked_status, step, kd_diag, aggregate_with_batches)
             if not weighted_terms:
                 raise RuntimeError("no weighted losses reached the optimizer")
             loss = sum(weighted_terms)
@@ -464,8 +539,6 @@ def train(
             parameter_audit = _gradient_audit(model, audit_before) if audit_before else {}
             step_runtime = model.consume_runtime_stats() if hasattr(model, "consume_runtime_stats") else {}
             runtime_stats.update({key: int(value) for key, value in step_runtime.items()})
-            for key, value in kd_diag.items():
-                kd_aggregate[key] += float(value)
             actual_steps = step
             record = {
                 "step": step,
@@ -485,6 +558,7 @@ def train(
 
     if actual_steps != int(total_steps):
         raise RuntimeError("training ended at step %d, expected %d" % (actual_steps, int(total_steps)))
+    exposure["pl_schedule_fallback_count"] = int(sampler.pl_schedule_fallback_count)
     exposure_state = _exposure_state(exposure)
     exposure = _finalize_exposure(exposure)
     motion_cfg = dict(resolved.get("motion", {}))
@@ -532,6 +606,7 @@ def train(
         "sampler_state": sampler.state_dict(),
         "exposure_state": exposure_state,
         "kd_aggregate": dict(kd_aggregate),
+        "kd_replay_batches_seen": int(kd_replay_batches_seen),
         "rng_state": _capture_rng(),
     }, str(checkpoint_path))
     summary = {
@@ -565,6 +640,7 @@ def train(
         "runtime_stats": dict(sorted(runtime_stats.items())),
         "kd_enabled": bool(kd_module is not None),
         "kd_aggregate": dict(kd_aggregate),
+        "kd_replay_batches_seen": int(kd_replay_batches_seen),
         "actual_modules": metadata.get("actual_modules", {}),
         "actual_loss_weights": metadata.get("actual_loss_weights", {}),
         "step_log": step_log.name,

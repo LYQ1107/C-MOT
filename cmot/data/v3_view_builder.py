@@ -53,6 +53,7 @@ def _load_pl(path: Optional[str], old_ids: Sequence[int]) -> Tuple[Dict[str, Lis
     if not path:
         return result, metadata, stats
     seen_frames = set()
+    allowed_old_ids = {int(value) for value in old_ids}
     with Path(path).open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
@@ -70,6 +71,12 @@ def _load_pl(path: Optional[str], old_ids: Sequence[int]) -> Tuple[Dict[str, Lis
                 continue
             seen_frames.add(frame_key)
             video_uid = str(record.get("video_uid") or record.get("video_id") or frame_key.rsplit("/", 1)[0])
+            frame_index = record.get("frame_index")
+            if frame_index is None:
+                try:
+                    frame_index = int(str(frame_key).rsplit("/", 1)[-1])
+                except (TypeError, ValueError):
+                    frame_index = None
             for raw in record.get("predictions", []):
                 try:
                     gid = int(raw["global_id"])
@@ -79,7 +86,7 @@ def _load_pl(path: Optional[str], old_ids: Sequence[int]) -> Tuple[Dict[str, Lis
                 except (KeyError, TypeError, ValueError):
                     stats["invalid_prediction"] += 1
                     continue
-                if gid not in set(int(v) for v in old_ids) or not math.isfinite(score) or len(bbox) != 4:
+                if gid not in allowed_old_ids or not math.isfinite(score) or len(bbox) != 4:
                     stats["invalid_prediction"] += 1
                     continue
                 if not all(math.isfinite(v) for v in bbox) or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
@@ -105,13 +112,82 @@ def _load_pl(path: Optional[str], old_ids: Sequence[int]) -> Tuple[Dict[str, Lis
                     "acquired_stage": "teacher_pl",
                     "teacher_checkpoint_sha256": str(teacher_hash),
                     "pl_segment_id": raw.get("pl_segment_id"),
+                    "segment_length": raw.get("segment_length"),
+                    "segment_reliability": raw.get("segment_reliability", raw.get("reliability")),
+                    "segment_mean_score": raw.get("segment_mean_score"),
                     "reliability": raw.get("reliability"),
+                    "frame_index": frame_index,
+                    "timestamp_s": record.get("timestamp_s"),
                 })
                 stats["raw_pl"] += 1
     if not metadata.get("teacher_checkpoint_sha256"):
         stats["pl_disabled_missing_teacher_hash"] += 1
         return defaultdict(list), metadata, stats
     return result, metadata, stats
+
+
+def _validate_pl_segments(
+    frame_records: Mapping[str, Sequence[Mapping[str, object]]],
+    metadata: Mapping[str, object],
+    max_gap_s: float,
+) -> None:
+    """Reject malformed qpl_segment_v2 records before view construction."""
+    if metadata.get("pseudo_policy_version") != "qpl_segment_v2":
+        return
+    grouped = defaultdict(list)
+    for frame_key, predictions in frame_records.items():
+        for prediction in predictions:
+            segment_id = prediction.get("pl_segment_id")
+            required = (segment_id, prediction.get("segment_length"), prediction.get("segment_reliability"), prediction.get("segment_mean_score"))
+            if not segment_id or any(value is None for value in required[1:]):
+                raise ValueError("qpl_segment_v2 prediction is missing segment metadata: %s" % frame_key)
+            try:
+                frame_index = int(prediction["frame_index"])
+                segment_length = int(prediction["segment_length"])
+                reliability = float(prediction["segment_reliability"])
+                mean_score = float(prediction["segment_mean_score"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("qpl_segment_v2 prediction has invalid segment metadata: %s" % frame_key)
+            if segment_length <= 0 or not math.isfinite(reliability) or not math.isfinite(mean_score):
+                raise ValueError("qpl_segment_v2 prediction has non-finite segment metadata: %s" % frame_key)
+            grouped[str(segment_id)].append((str(frame_key), frame_index, prediction))
+    for segment_id, values in grouped.items():
+        values.sort(key=lambda item: (item[1], item[0]))
+        video_uids = {str(item[2].get("video_uid", "")) for item in values}
+        global_ids = {int(item[2].get("global_semantic_id", -1)) for item in values}
+        track_ids = {int(item[2].get("teacher_track_id", item[2].get("track_id", -1))) for item in values}
+        if len(video_uids) != 1 or len(global_ids) != 1 or len(track_ids) != 1:
+            raise ValueError("qpl segment identity changes within %s" % segment_id)
+        frame_indexes = [item[1] for item in values]
+        if any(right - left != 1 for left, right in zip(frame_indexes, frame_indexes[1:])):
+            raise ValueError("qpl segment is not contiguous: %s" % segment_id)
+        declared_lengths = {int(item[2]["segment_length"]) for item in values}
+        if declared_lengths != {len(values)}:
+            raise ValueError("qpl segment length mismatch: %s" % segment_id)
+        for (_, _, left), (_, _, right) in zip(values, values[1:]):
+            if left.get("timestamp_s") is not None and right.get("timestamp_s") is not None:
+                try:
+                    dt = float(right["timestamp_s"]) - float(left["timestamp_s"])
+                except (TypeError, ValueError):
+                    raise ValueError("qpl segment timestamp is invalid: %s" % segment_id)
+                if not math.isfinite(dt) or dt <= 0.0 or dt > float(max_gap_s):
+                    raise ValueError("qpl segment timestamp gap is invalid: %s" % segment_id)
+
+
+def _validate_output_pl_segments(videos: Sequence[Mapping[str, object]], max_gap_s: float) -> None:
+    grouped = defaultdict(list)
+    for video in videos:
+        for frame in video.get("frames", []):
+            for ann in frame.get("annotations", []):
+                if ann.get("label_source") != "pl":
+                    continue
+                value = dict(ann)
+                value["video_uid"] = str(video.get("source_video_uid") or video.get("video_id"))
+                value["frame_index"] = int(frame.get("frame_index", 0))
+                value["frame_key"] = str(frame.get("frame_key", ""))
+                value["timestamp_s"] = frame.get("timestamp_s")
+                grouped[str(ann.get("pl_segment_id"))].append(value)
+    _validate_pl_segments(grouped, {"pseudo_policy_version": "qpl_segment_v2"}, max_gap_s)
 
 
 def _eligible(video: Mapping[str, object], new_ids: Sequence[int]) -> bool:
@@ -195,12 +271,16 @@ def build_view(
     enable_pl: bool = False,
     total_pl_cap: Optional[int] = None,
     min_segment_frames: int = 3,
+    max_gap_s: float = 1.0,
 ) -> dict:
     """Build a view for one fixed source-video partition."""
     canonical = json.loads(Path(canonical_path).read_text(encoding="utf-8"))
     selected = set(str(v) for v in video_ids)
     pl, pl_metadata, pl_stats = _load_pl(pl_path if enable_pl else None, old_ids)
     stage_stats = Counter(pl_stats)
+    qpl_segment_mode = bool(enable_pl and pl_metadata.get("pseudo_policy_version") == "qpl_segment_v2")
+    if qpl_segment_mode:
+        _validate_pl_segments(pl, pl_metadata, max_gap_s)
     if enable_pl and pl_path and not pl_metadata.get("teacher_checkpoint_sha256"):
         enable_pl = False
         stage_stats["pl_disabled_missing_teacher_hash"] += 1
@@ -233,22 +313,32 @@ def build_view(
                 candidates = []
                 if enable_pl:
                     for pred in sorted(pl.get(str(frame.get("frame_key")), []), key=lambda x: (-float(x["score"]), x["pl_identity"])):
-                        if total_pl_cap is not None and total_pl >= int(total_pl_cap):
+                        # qpl_segment_v2 has already applied its only budget at
+                        # segment level.  Legacy V2/V3 snapshots retain the
+                        # old frame cap solely for backwards compatibility.
+                        if not qpl_segment_mode and total_pl_cap is not None and total_pl >= int(total_pl_cap):
                             break
                         if int(pred["global_semantic_id"]) not in set(int(v) for v in old_ids):
                             continue
-                        if any(
+                        has_conflict = any(
                             int(gt["global_semantic_id"]) != int(pred["global_semantic_id"])
                             and _bbox_iou(gt["bbox_xyxy"], pred["bbox_xyxy"]) >= float(conflict_iou)
                             for gt in kept
-                        ):
-                            stage_stats["gt_pl_conflict"] += 1
-                            continue
-                        if any(
+                        )
+                        has_duplicate = any(
                             int(other["global_semantic_id"]) == int(pred["global_semantic_id"])
                             and _bbox_iou(other["bbox_xyxy"], pred["bbox_xyxy"]) >= float(duplicate_iou)
                             for other in candidates
-                        ):
+                        )
+                        if qpl_segment_mode and (has_conflict or has_duplicate):
+                            # A prevalidated segment cannot lose a frame here:
+                            # doing so would silently violate its continuity.
+                            reason = "GT conflict" if has_conflict else "duplicate"
+                            raise ValueError("qpl_segment_v2 %s at frame %s" % (reason, frame.get("frame_key")))
+                        if has_conflict:
+                            stage_stats["gt_pl_conflict"] += 1
+                            continue
+                        if has_duplicate:
                             stage_stats["pl_duplicate"] += 1
                             continue
                         candidates.append(deepcopy(pred))
@@ -269,6 +359,8 @@ def build_view(
             if output_split is not None:
                 new_video["split"] = str(output_split)
             output_videos.append(new_video)
+    if qpl_segment_mode:
+        _validate_output_pl_segments(output_videos, max_gap_s)
     result = {
         "schema_version": "cmot.continual_v3.view",
         "view_kind": "current" if mode == "train" else "evaluation",
@@ -281,13 +373,26 @@ def build_view(
         "source_manifest": Path(canonical_path).name,
         "source_manifest_sha256": sha256_file(canonical_path),
         "pl_source": None if not pl_path else Path(pl_path).name,
-        "pl_metadata": {k: v for k, v in pl_metadata.items() if k in ("teacher_checkpoint_sha256", "prediction_sha256", "frame_list_sha256")},
+        "pl_metadata": {
+            k: v
+            for k, v in pl_metadata.items()
+            if k in (
+                "pseudo_policy_version",
+                "pseudo_policy_hash",
+                "teacher_checkpoint_sha256",
+                "raw_prediction_sha256",
+                "calibration_view_sha256",
+                "prediction_sha256",
+                "frame_list_sha256",
+            )
+        },
         "stats": {
             "videos": len(output_videos),
             "frames": sum(len(v["frames"]) for v in output_videos),
             "annotations": sum(len(f.get("annotations", [])) for v in output_videos for f in v["frames"]),
             "annotations_by_source": dict(Counter(a.get("label_source", "unknown") for v in output_videos for f in v["frames"] for a in f.get("annotations", []))),
             "pl_used": int(total_pl),
+            "qpl_segment_mode": bool(qpl_segment_mode),
             "stage_events": dict(sorted(stage_stats.items())),
         },
         "videos": output_videos,

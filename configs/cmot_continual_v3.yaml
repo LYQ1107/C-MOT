@@ -64,9 +64,15 @@ supervision:
   pl_duplicate_iou: 0.7
 pseudo:
   enabled: true
+  policy_version: qpl_segment_v2
   per_class_threshold: {}
   per_class_cap: {}
   total_cap: 40
+  total_segment_cap: 40
+  per_class_segment_cap: {206: 20, 792: 20}
+  max_segment_frames: 8
+  total_frame_cap: 256
+  pl_clip_fraction: 0.25
   min_segment_frames: 3
   max_gap_s: 1.0
   calibration_version: wilson95_iou50_v1
@@ -84,6 +90,7 @@ distillation:
   warmup_steps: 100
   iou_min: 0.5
   score_min: 0.5
+  fail_fast_replay_batches: 8
   cache_enabled: false
 inference:
   birth_threshold: 0.50

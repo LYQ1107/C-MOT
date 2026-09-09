@@ -144,6 +144,12 @@ class ContinualVideoDataset(Dataset):
                         if int(a.get("global_semantic_id", -1)) in self.focus_global_ids
                         and a.get("label_source", "gt") in ("gt", "gt_replay")
                     })
+                    pl_segment_ids = sorted({
+                        str(a["pl_segment_id"])
+                        for f in selected
+                        for a in f.get("annotations", [])
+                        if a.get("label_source") == "pl" and a.get("pl_segment_id")
+                    })
                     index.append({
                         "stream": video.get("stream", "current"),
                         "video_id": str(video["video_id"]),
@@ -155,6 +161,8 @@ class ContinualVideoDataset(Dataset):
                         "stride": int(stride),
                         "focus_global_ids": focus,
                         "focus_class": focus[0] if focus else None,
+                        "pl_segment_ids": pl_segment_ids,
+                        "has_pl": bool(pl_segment_ids),
                         "motion_time_valid": bool(time_valid),
                         "clip_id": "%s:%s:%d:%d" % (video["video_id"], video.get("stream", "current"), start, stride),
                     })
@@ -201,6 +209,8 @@ class ContinualVideoDataset(Dataset):
                 "stream": item.get("stream", "current"),
                 "focus_class": item.get("focus_class"),
                 "focus_global_ids": item.get("focus_global_ids", []),
+                "pl_segment_ids": item.get("pl_segment_ids", []),
+                "has_pl": bool(item.get("has_pl", False)),
                 "source_video_uid": str(item.get("source_video_uid") or item["source_video_id"]),
                 "augmentation_seed": int(hashlib.sha256(item["clip_id"].encode("utf-8")).hexdigest()[:8], 16),
             },

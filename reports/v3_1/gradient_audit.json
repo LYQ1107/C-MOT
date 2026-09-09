@@ -1,0 +1,86 @@
+{
+  "schema_version": "cmot.continual_v3_1.gradient_audit.v1",
+  "note": "Values are copied from the named run's actual train_steps.jsonl; full logs remain private.",
+  "runs": {
+    "R-QPLSEG-S1": {
+      "device": "9",
+      "steps": {
+        "1": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.019376788288354874, "update_norm": 0.0014516051160171628},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.013823387213051319, "update_norm": 0.007191208656877279},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0010049323318526149, "update_norm": 0.01213062833994627}
+        },
+        "100": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.006032893434166908, "update_norm": 0.0003928090154659003},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0016242728120121598, "update_norm": 0.001042802818119526},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0005482654669322073, "update_norm": 0.0032696202397346497}
+        },
+        "600": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.007075783330947161, "update_norm": 0.0005312845460139215},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.003172126831486821, "update_norm": 0.001065916963852942},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0002024191926466301, "update_norm": 0.0025398661382496357}
+        }
+      }
+    },
+    "R-QPLSEG-KD-S1": {
+      "device": "9",
+      "steps": {
+        "1": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.01937682554125786, "update_norm": 0.0014516044175252318},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.013823304325342178, "update_norm": 0.007191208191215992},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.001004926161840558, "update_norm": 0.012130625545978546}
+        },
+        "100": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.007092655636370182, "update_norm": 0.00038399474578909576},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0019393465481698513, "update_norm": 0.0009829341433942318},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0002949526533484459, "update_norm": 0.0032413082662969828}
+        },
+        "600": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.00626642070710659, "update_norm": 0.0005372497835196555},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.006634116638451815, "update_norm": 0.0012084987247362733},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.00021556162391789258, "update_norm": 0.002286556176841259}
+        }
+      }
+    },
+    "R-QPLSEG-S2": {
+      "device": "9",
+      "steps": {
+        "1": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.022388122975826263, "update_norm": 0.0016243977006524801},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.01880520023405552, "update_norm": 0.0072221108712255955},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0010773029644042253, "update_norm": 0.011981060728430748}
+        },
+        "100": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.01050544437021017, "update_norm": 0.00040304925641976297},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.011068650521337986, "update_norm": 0.0010297686094418168},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0008165670442394912, "update_norm": 0.0029273852705955505}
+        },
+        "600": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.012349504046142101, "update_norm": 0.0004997013602405787},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.005366490222513676, "update_norm": 0.0018543547485023737},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0009508516523055732, "update_norm": 0.0029372824355959892}
+        }
+      }
+    },
+    "R-QPLSEG-KD-S2": {
+      "device": "9",
+      "steps": {
+        "1": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.019784772768616676, "update_norm": 0.0016145315021276474},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.019754702225327492, "update_norm": 0.007222176995128393},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.001418550731614232, "update_norm": 0.011841466650366783}
+        },
+        "100": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.011360461823642254, "update_norm": 0.00041297110146842897},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.013306736946105957, "update_norm": 0.0010714979143813252},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0007844498031772673, "update_norm": 0.002715017180889845}
+        },
+        "600": {
+          "backbone.0.body.layer4.2.conv3.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.009094697423279285, "update_norm": 0.00046568791731260717},
+          "patch2query.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0035698581486940384, "update_norm": 0.00167999102268368},
+          "track_embed.linear1.weight": {"grad_present": true, "grad_finite": true, "grad_norm": 0.0003771741467062384, "update_norm": 0.0027848221361637115}
+        }
+      }
+    }
+  }
+}

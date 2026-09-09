@@ -1,21 +1,51 @@
-"""Matched old-class replay distillation.
+"""Replay-aligned distillation for old classes.
 
-Only replay GT identities are eligible.  Teacher inference is intentionally
-kept outside the student's autograd graph and is evaluated independently from
-the student's current prediction queries.
+The three box sources consumed here use one explicit contract:
+
+* student predictions: normalized ``cxcywh``;
+* teacher predictions: normalized ``cxcywh``;
+* replay ``Instances.boxes``: normalized ``cxcywh``.
+
+Conversion to ``xyxy`` happens only inside the IoU calculation.  KD is
+eligible only for old-class GT identities that have a one-to-one Hungarian
+alignment on both the student and frozen teacher queries.
 """
 
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 import torch
+from scipy.optimize import linear_sum_assignment
 from torch import nn
 
 from .supervision import bernoulli_kl
 
 
+def _cxcywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
+    """Convert normalized ``cxcywh`` boxes to ``xyxy`` boxes."""
+    if boxes.numel() == 0:
+        return boxes.reshape(-1, 4)
+    if boxes.shape[-1] != 4:
+        raise ValueError("cxcywh boxes must have four coordinates")
+    cx = boxes[..., 0]
+    cy = boxes[..., 1]
+    w = boxes[..., 2].clamp(min=0)
+    h = boxes[..., 3].clamp(min=0)
+    return torch.stack(
+        [
+            cx - 0.5 * w,
+            cy - 0.5 * h,
+            cx + 0.5 * w,
+            cy + 0.5 * h,
+        ],
+        dim=-1,
+    )
+
+
 def _xyxy_iou(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
     if left.numel() == 0 or right.numel() == 0:
         return left.new_zeros((left.shape[0], right.shape[0]))
+    left = left.reshape(-1, 4)
+    right = right.reshape(-1, 4)
     lt = torch.maximum(left[:, None, :2], right[None, :, :2])
     rb = torch.minimum(left[:, None, 2:], right[None, :, 2:])
     wh = (rb - lt).clamp(min=0)
@@ -25,14 +55,28 @@ def _xyxy_iou(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
     return inter / (area_l[:, None] + area_r[None, :] - inter).clamp(min=1e-8)
 
 
-def _boxes_from_prediction(boxes: torch.Tensor) -> torch.Tensor:
-    # OVTR predicts normalized cxcywh for its public output.  Accept xyxy too
-    # when a caller explicitly supplies a replay-side tensor.
-    if boxes.numel() == 0:
-        return boxes.reshape(-1, 4)
-    cxcy = boxes[..., :2]
-    wh = boxes[..., 2:].clamp(min=0)
-    return torch.cat((cxcy - 0.5 * wh, cxcy + 0.5 * wh), dim=-1)
+@torch.no_grad()
+def _align_queries_to_gt(
+    query_boxes_cxcywh: torch.Tensor,
+    gt_boxes_cxcywh: torch.Tensor,
+    iou_min: float,
+) -> Tuple[Dict[int, int], torch.Tensor]:
+    """Return a one-to-one ``gt_index -> query_index`` Hungarian mapping."""
+    query_boxes_cxcywh = query_boxes_cxcywh.reshape(-1, 4)
+    gt_boxes_cxcywh = gt_boxes_cxcywh.reshape(-1, 4)
+    ious = _xyxy_iou(
+        _cxcywh_to_xyxy(query_boxes_cxcywh),
+        _cxcywh_to_xyxy(gt_boxes_cxcywh),
+    )
+    if ious.numel() == 0:
+        return {}, ious
+    finite_ious = torch.where(torch.isfinite(ious), ious, torch.zeros_like(ious))
+    rows, cols = linear_sum_assignment((-finite_ious.detach().cpu().numpy()))
+    mapping: Dict[int, int] = {}
+    for query_index, gt_index in zip(rows, cols):
+        if float(finite_ious[int(query_index), int(gt_index)].item()) >= float(iou_min):
+            mapping[int(gt_index)] = int(query_index)
+    return mapping, finite_ious
 
 
 class ReplayAlignedDistillation(nn.Module):
@@ -55,8 +99,15 @@ class ReplayAlignedDistillation(nn.Module):
         self.training_step = 0
         self.last_diagnostics: Dict[str, float] = {
             "replay_gt_objects": 0.0,
+            "student_iou_pass": 0.0,
+            "teacher_iou_pass": 0.0,
+            "joint_alignment_pass": 0.0,
+            "shared_old_class_objects": 0.0,
+            "teacher_score_pass": 0.0,
             "valid_kd_objects": 0.0,
+            "kd_cells": 0.0,
             "kd_pairs": 0.0,
+            "effective_lambda": 0.0,
         }
 
     def set_training_step(self, step: int) -> None:
@@ -73,34 +124,33 @@ class ReplayAlignedDistillation(nn.Module):
             return default
         return getattr(instances, name)
 
-    @torch.no_grad()
-    def _greedy_alignment(
-        self,
-        student_boxes: torch.Tensor,
-        teacher_boxes: torch.Tensor,
-        gt_boxes: torch.Tensor,
-    ) -> List[Tuple[int, int, int]]:
-        if gt_boxes.numel() == 0:
-            return []
-        student_iou = _xyxy_iou(_boxes_from_prediction(student_boxes), gt_boxes)
-        teacher_iou = _xyxy_iou(_boxes_from_prediction(teacher_boxes), gt_boxes)
-        result: List[Tuple[int, int, int]] = []
-        used = set()
-        # Replay identities are scarce; assign the best unused student query
-        # to each GT identity, then let score/IoU gates decide validity.
-        for target_index in range(gt_boxes.shape[0]):
-            values = student_iou[:, target_index]
-            if values.numel() == 0:
-                continue
-            order = torch.argsort(values, descending=True).tolist()
-            for query_index in order:
-                if int(query_index) not in used:
-                    used.add(int(query_index))
-                    if float(values[query_index]) >= self.iou_min and float(teacher_iou[:, target_index].max()) >= self.iou_min:
-                        teacher_query = int(torch.argmax(teacher_iou[:, target_index]).item())
-                        result.append((int(query_index), teacher_query, target_index))
-                    break
-        return result
+    @staticmethod
+    def _frame_value(values, index: int):
+        if values is None:
+            return None
+        if isinstance(values, (list, tuple)):
+            if not values:
+                return None
+            return values[min(int(index), len(values) - 1)]
+        return values
+
+    @staticmethod
+    def _select_id_columns(
+        student_select_ids: Optional[torch.Tensor],
+        teacher_select_ids: Optional[torch.Tensor],
+        old_global_ids: Sequence[int],
+    ) -> Dict[int, Tuple[int, int]]:
+        if student_select_ids is None or teacher_select_ids is None:
+            return {}
+        student_select_ids = torch.as_tensor(student_select_ids).reshape(-1).tolist()
+        teacher_select_ids = torch.as_tensor(teacher_select_ids).reshape(-1).tolist()
+        student_columns = {int(value): index for index, value in enumerate(student_select_ids)}
+        teacher_columns = {int(value): index for index, value in enumerate(teacher_select_ids)}
+        return {
+            int(global_id): (student_columns[int(global_id)], teacher_columns[int(global_id)])
+            for global_id in old_global_ids
+            if int(global_id) in student_columns and int(global_id) in teacher_columns
+        }
 
     def forward(
         self,
@@ -123,9 +173,18 @@ class ReplayAlignedDistillation(nn.Module):
             student_boxes = [student_boxes]
         if not isinstance(teacher_boxes, (list, tuple)):
             teacher_boxes = [teacher_boxes]
+
+        old_ids = tuple(sorted({int(value) for value in old_global_ids}))
         total = None
-        replay_count = valid_count = 0
-        old_ids = {int(value) for value in old_global_ids}
+        replay_count = 0
+        student_iou_pass = 0
+        teacher_iou_pass = 0
+        joint_alignment_pass = 0
+        shared_old_class_objects = 0
+        teacher_score_pass = 0
+        valid_count = 0
+        kd_cells = 0
+
         for frame_index, instances in enumerate(replay_instances):
             labels = self._get_field(instances, "labels")
             sources = self._get_field(instances, "label_sources")
@@ -134,22 +193,23 @@ class ReplayAlignedDistillation(nn.Module):
                 continue
             if sources is None:
                 sources = torch.zeros_like(labels)
-            # Both source_gt and a previously saved gt_replay snapshot are
-            # legal memory supervision.  Current PL is intentionally excluded
-            # from KD and cannot become a replay identity.
-            keep = torch.isin(sources, torch.as_tensor((0, 1), device=sources.device)) & torch.tensor(
-                [int(v) in old_ids for v in labels.tolist()], device=labels.device
-            )
-            keep &= labels >= 0
+            old_label = torch.zeros_like(labels, dtype=torch.bool)
+            for global_id in old_ids:
+                old_label |= labels == int(global_id)
+            legal_source = (sources == 0) | (sources == 1)
+            keep = legal_source & old_label & (labels >= 0)
             if not bool(keep.any()):
                 continue
             gt_labels = labels[keep]
-            gt_boxes = boxes[keep]
+            gt_boxes = boxes[keep].reshape(-1, 4)
             replay_count += int(gt_labels.numel())
-            s_boxes = student_boxes[min(frame_index, len(student_boxes) - 1)]
-            t_boxes = teacher_boxes[min(frame_index, len(teacher_boxes) - 1)]
-            s_logits = student_logits[min(frame_index, len(student_logits) - 1)]
-            t_logits = teacher_logits[min(frame_index, len(teacher_logits) - 1)]
+
+            s_boxes = self._frame_value(student_boxes, frame_index)
+            t_boxes = self._frame_value(teacher_boxes, frame_index)
+            s_logits = self._frame_value(student_logits, frame_index)
+            t_logits = self._frame_value(teacher_logits, frame_index)
+            if any(value is None for value in (s_boxes, t_boxes, s_logits, t_logits)):
+                continue
             if s_boxes.dim() == 3:
                 s_boxes = s_boxes[0]
             if t_boxes.dim() == 3:
@@ -158,39 +218,67 @@ class ReplayAlignedDistillation(nn.Module):
                 s_logits = s_logits[0]
             if t_logits.dim() == 3:
                 t_logits = t_logits[0]
-            pairs = self._greedy_alignment(s_boxes, t_boxes, gt_boxes)
-            s_ids = student_select_ids[frame_index] if student_select_ids is not None else None
-            t_ids = teacher_select_ids[frame_index] if teacher_select_ids is not None else None
-            for student_query, teacher_query, target_pos in pairs:
-                global_id = int(gt_labels[target_pos].item())
-                if s_ids is None or t_ids is None:
+
+            student_map, _ = _align_queries_to_gt(s_boxes, gt_boxes, self.iou_min)
+            teacher_map, _ = _align_queries_to_gt(t_boxes, gt_boxes, self.iou_min)
+            student_iou_pass += len(student_map)
+            teacher_iou_pass += len(teacher_map)
+            joint = sorted(set(student_map).intersection(teacher_map))
+            joint_alignment_pass += len(joint)
+
+            s_ids = self._frame_value(student_select_ids, frame_index)
+            t_ids = self._frame_value(teacher_select_ids, frame_index)
+            shared_columns = self._select_id_columns(s_ids, t_ids, old_ids)
+            for target_index in joint:
+                if not shared_columns:
                     continue
-                s_matches = (s_ids == global_id).nonzero(as_tuple=False).flatten()
-                t_matches = (t_ids == global_id).nonzero(as_tuple=False).flatten()
-                if s_matches.numel() == 0 or t_matches.numel() == 0:
+                shared_old_class_objects += 1
+                global_id = int(gt_labels[target_index].item())
+                columns = shared_columns.get(global_id)
+                if columns is None:
+                    # The true GT class must be present for the teacher score
+                    # gate, even though KD itself covers every shared old class.
                     continue
-                s_col = int(s_matches[0].item())
-                t_col = int(t_matches[0].item())
-                if float(t_logits[teacher_query, t_col].sigmoid()) < self.score_min:
+                student_query = student_map[target_index]
+                teacher_query = teacher_map[target_index]
+                student_column, teacher_column = columns
+                if float(t_logits[teacher_query, teacher_column].sigmoid().item()) < self.score_min:
                     continue
+                teacher_score_pass += 1
+                student_values = []
+                teacher_values = []
+                for _, (s_column, t_column) in sorted(shared_columns.items()):
+                    student_values.append(s_logits[student_query, s_column])
+                    teacher_values.append(t_logits[teacher_query, t_column])
+                student_old_logits = torch.stack(student_values)
+                teacher_old_logits = torch.stack(teacher_values)
                 value = bernoulli_kl(
-                    s_logits[student_query, s_col],
-                    t_logits[teacher_query, t_col],
+                    student_old_logits,
+                    teacher_old_logits,
                     self.temperature,
-                )
+                ).mean()
                 total = value if total is None else total + value
                 valid_count += 1
+                kd_cells += len(shared_columns)
+
         if total is None:
-            # Keep the graph connected to the current model while reporting
-            # equivalence to replay without valid KD objects.
-            reference = student_logits[0]
+            # Keep the graph connected to the student while reporting the
+            # exact gate at which replay KD became ineligible.
+            reference = next(value for value in student_logits if value is not None)
             total = reference.sum() * 0.0
         total = total / float(max(valid_count, 1))
-        total = total * self.effective_lambda()
+        effective_lambda = self.effective_lambda()
+        total = total * effective_lambda
         self.last_diagnostics = {
             "replay_gt_objects": float(replay_count),
+            "student_iou_pass": float(student_iou_pass),
+            "teacher_iou_pass": float(teacher_iou_pass),
+            "joint_alignment_pass": float(joint_alignment_pass),
+            "shared_old_class_objects": float(shared_old_class_objects),
+            "teacher_score_pass": float(teacher_score_pass),
             "valid_kd_objects": float(valid_count),
+            "kd_cells": float(kd_cells),
             "kd_pairs": float(valid_count),
-            "effective_lambda": float(self.effective_lambda()),
+            "effective_lambda": float(effective_lambda),
         }
         return total, dict(self.last_diagnostics)
