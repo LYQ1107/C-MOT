@@ -1,0 +1,99 @@
+{
+  "schema_version": "cmot.cooler_compat.full_bdd_discovery.v1",
+  "status": "BLOCKED_FULL_BDD_MISSING",
+  "downloads": "NOT_RUN_no_new_data_or_dependency_download",
+  "candidate_root": {
+    "directory_basename": "BDD100K",
+    "track_annotation_files": {
+      "train": 0,
+      "val": 0
+    },
+    "standard_100k_image_files": {
+      "train": 70000,
+      "val": 10000
+    },
+    "standard_100k_label_files": {
+      "train": 70000,
+      "val": 10000
+    },
+    "standard_label_semantics": "per-image detection labels; not box_track_20 temporal annotations",
+    "track_image_archive": {
+      "basename": "images20-track-val-1.zip",
+      "bytes": 4983938716,
+      "split": "val",
+      "video_directories": 200,
+      "jpg_entries": 39973,
+      "json_or_jsonl_entries": 0,
+      "label_or_annotation_named_entries": 0
+    }
+  },
+  "best_existing_local_box_track_match": {
+    "annotation_source_basename": "box_track_20",
+    "annotation_video_files": {
+      "train": 1400,
+      "val": 200
+    },
+    "annotation_frames": {
+      "train": 278079,
+      "val": 39973
+    },
+    "annotation_boxes_all_categories": {
+      "train": 2886916,
+      "val": 465512
+    },
+    "track_image_source_basename": "track",
+    "track_image_video_directories": {
+      "train": 200,
+      "val": 200
+    },
+    "common_annotation_and_image_videos": {
+      "train": 200,
+      "val": 200
+    },
+    "annotation_videos_without_image_directory": {
+      "train": 1200,
+      "val": 0
+    },
+    "missing_referenced_track_frames": {
+      "train": 238661,
+      "val": 0
+    },
+    "categories_seen": [
+      "bicycle",
+      "bus",
+      "car",
+      "motorcycle",
+      "other person",
+      "other vehicle",
+      "pedestrian",
+      "rider",
+      "trailer",
+      "train",
+      "truck"
+    ],
+    "label_bundle_basename": "box_track_labels_trainval.zip",
+    "label_bundle_bytes": 119630855,
+    "label_bundle_contains_images": false
+  },
+  "full_bdd_discovery": {
+    "expected_annotation_videos": {
+      "train": 1400,
+      "val": 200
+    },
+    "expected_image_videos": {
+      "train": 1400,
+      "val": 200
+    },
+    "annotation_video_count_train": 1400,
+    "annotation_video_count_val": 200,
+    "image_video_count_train": 200,
+    "image_video_count_val": 200,
+    "full_bdd_gate_passed": false,
+    "blockers": [
+      "CANDIDATE_ROOT_HAS_NO_BOX_TRACK_20_SOURCE",
+      "BDD_TRAIN_TRACK_IMAGE_VIDEO_COUNT_MISMATCH",
+      "BDD_REFERENCED_TRAIN_TRACK_FRAMES_MISSING"
+    ]
+  },
+  "protocol_action": "No canonical full manifest, runtime binding, checkpoint, prediction, TrackEval result, or formal S0/S1/S2/Oracle training was created from this incomplete source. Existing source directories and prior outputs remain read-only."
+}
